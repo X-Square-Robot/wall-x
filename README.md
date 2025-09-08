@@ -76,14 +76,8 @@ Training script path configuration
 - Robot DOF configuration
 - Training hyperparameters
 
-Download the Flow/FAST pretrained model and run:
 ```bash
 bash ./workspace/lerobot_example/run.sh
-```
-
-To fine-tune using the FAST tokenizer, please download the repository and update the `action_tokenizer_path`. Make sure to set `use_fast_tokenizer` to `true`:
-```bash
-git clone https://huggingface.co/physical-intelligence/fast
 ```
 
 ## Inference

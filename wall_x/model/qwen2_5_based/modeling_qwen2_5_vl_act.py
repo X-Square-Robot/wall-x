@@ -1,7 +1,6 @@
 import os
 import torch
 import numpy as np
-import glob
 import torch.nn as nn
 from torchdiffeq import odeint
 from dataclasses import dataclass
@@ -686,6 +685,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         """
         
         # Load model components from pretrained path
+        model_path = os.path.join(pretrained_model_path, "model.safetensors")
         config_path = os.path.join(pretrained_model_path, "config.json")
         config = cls.config_class.from_pretrained(config_path)
         processor = AutoProcessor.from_pretrained(pretrained_model_path, use_fast=True)
@@ -703,13 +703,8 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         model.resize_token_embeddings(len(processor.tokenizer))
         
         # Load model state dict from safetensors file
-        safetensor_files = glob.glob(os.path.join(pretrained_model_path, "*.safetensors"))
-        state_dict = {}
-        for file in safetensor_files:
-            sd = load_file(file, device="cpu")
-            state_dict.update(sd)
-
-        model.load_state_dict(state_dict, strict=False)
+        state_dict = load_file(model_path, device="cpu")
+        msg = model.load_state_dict(state_dict, strict=False)
         
         return model
 

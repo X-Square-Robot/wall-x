@@ -108,7 +108,7 @@ class QwenVlAct_Trainer:
             ValueError: If required configuration keys are missing
         """
         # Validate required configuration keys
-        required_keys = ["learning_rate", "num_epoch"]
+        required_keys = ["processor_path", "qwen_vl_act_config_path", "learning_rate", "num_epoch"]
         for key in required_keys:
             if key not in config:
                 raise ValueError(f"Missing required configuration key: {key}")
@@ -196,9 +196,6 @@ class QwenVlAct_Trainer:
         for epoch in range(self.start_epoch, self.num_epoch):
             self.train_loop(epoch)
             self.accelerator.wait_for_everyone()
-            
-            if (epoch + 1) % self.config.get("epoch_save_interval", 10) == 0:
-                self.save_checkpoint(epoch)
             
             # Validation after each epoch
             self.val_loop()

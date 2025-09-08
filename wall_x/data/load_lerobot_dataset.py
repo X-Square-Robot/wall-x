@@ -207,7 +207,7 @@ class DataCollator:
         self.load_processor()
 
     def load_processor(self):
-        processor_path = self.config["pretrained_qwen_vl_path"]
+        processor_path = self.config["processor_path"]
         action_tokenizer_path = self.config["action_tokenizer_path"]
 
         # Use cached processors if available
