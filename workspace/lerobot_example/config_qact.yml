@@ -5,9 +5,8 @@
 log_name: "robotic_training"
 log_project: "vla_training"
 model_type: qwen2_5
-processor_path: "/path/to/model/"
-pretrained_qwen_vl_path: "/path/to/qwen_vl_model/"
-qwen_vl_act_config_path: "/path/to/config.json"
+pretrained_qwen_vl_path: "/path/to/wallx_model/"
+use_fast_tokenizer: false # True: train FAST, False: train Flow
 action_tokenizer_path: "/path/to/fast/"
 save_path: "/path/to/workspace/"
 
@@ -27,6 +26,7 @@ num_epoch: 100
 gradient_accumulation_steps: 32
 batch_size_per_gpu: 8
 padding_side: left
+epoch_save_interval: 10
 
 # Robot configuration - Define degrees of freedom for each component
 dof_config:
@@ -52,10 +52,10 @@ agent_pos_config:
   height: 1
   car_pose: 3
 
-# Checkpoint resuming configuration
-resume:
-  ckpt: "/path/to/resume_model/"
-  load_ckpt_only: true
+# # Checkpoint resuming configuration
+# resume:
+#   ckpt: "/path/to/resume_model/"
+#   load_ckpt_only: true
 
 # Data configuration
 data:
