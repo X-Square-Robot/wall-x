@@ -101,6 +101,12 @@ To generate an open-loop comparison plot, please follow:
 python ./scripts/draw_openloop_plot.py
 ```
 
+To run VQA inference, please follow:
+
+```bash
+python ./scripts/vqa_inference.py
+```
+
 ## 📚 Cite Us
 
 If you find WALL-OSS models useful, please cite:
