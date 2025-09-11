@@ -30,7 +30,12 @@ class VQAWrapper(object):
         return model
 
     def generate(self, image: Image.Image, text: str, **kwargs) -> str:
-        messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": text}]}]
+        messages = [
+            {
+                "role": "user",
+                "content": [{"type": "image"}, {"type": "text", "text": text}],
+            }
+        ]
         text_prompt = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
@@ -38,18 +43,19 @@ class VQAWrapper(object):
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
         generation_params = {
-            "max_new_tokens": 1024, # default value, can be overridden by kwargs
+            "max_new_tokens": 1024,  # default value, can be overridden by kwargs
             "do_sample": False,
             "eos_token_id": self.processor.tokenizer.eos_token_id,
             "pad_token_id": self.processor.tokenizer.pad_token_id,
-            **kwargs
+            **kwargs,
         }
 
         with torch.no_grad():
             generated_ids = self.model.generate(**inputs, **generation_params)
 
         generated_ids = [
-            output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs['input_ids'], generated_ids)
+            output_ids[len(input_ids) :]
+            for input_ids, output_ids in zip(inputs["input_ids"], generated_ids)
         ]
         response = self.processor.batch_decode(
             generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
@@ -67,6 +73,7 @@ if __name__ == "__main__":
 
         # img = Image.open("/path/to/your/local/image.jpg").convert("RGB")
         import requests
+
         img = Image.open(requests.get(test_image_url, stream=True).raw).convert("RGB")
         answer = wrapper.generate(img, test_question)
 
