@@ -63,8 +63,8 @@ data:
   
   # LeRobot dataset configuration
   lerobot_config:
-    repo_id: "lerobot/aloha_mobile_cabinet"
-    root: null
+    repo_id: "lerobot/aloha_mobile_cabinet" #Required: for camera name mapping, even with local data
+    root: null                              #Optional: local dataset path, null means use HuggingFace
     episodes: null
     image_transforms: null
     delta_timestamps: null
