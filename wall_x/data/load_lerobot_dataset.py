@@ -263,7 +263,12 @@ class DataCollator:
 
     @classmethod
     def _normalize(cls, action, min_stat, delta):
-        x = (action - min_stat) / (delta)
+        """
+        Normalize action data using min-max normalization.
+        """
+        delta = torch.from_numpy(delta)
+        delta = torch.where(delta == 0, torch.ones_like(delta), delta)
+        x = (action - min_stat) / delta
         x = x * 2 - 1
         x = torch.clamp(x, -1, 1)
         return x
