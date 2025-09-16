@@ -495,3 +495,248 @@ class MultimodalRoPE(torch.autograd.Function):
 
 def multimodal_rope(q, k, cos, sin, mrope_section):
     return MultimodalRoPE.apply(q, k, cos, sin, mrope_section)
+
+
+################################################################################################
+##
+## RoPE Index 3D
+##
+################################################################################################
+
+
+def get_rope_index(
+    input_ids: torch.Tensor,
+    spatial_merge_size: int,
+    image_token_id: int,
+    video_token_id: int,
+    vision_start_token_id: int,
+    tokens_per_second: float,
+    image_grid_thw: torch.Tensor = None,
+    video_grid_thw: torch.Tensor = None,
+    second_per_grid_ts: torch.Tensor = None,
+    attention_mask: torch.Tensor = None,
+):
+    """
+    Generate 3D RoPE position indices for multimodal transformer inputs.
+
+    Computes position indices for text, image, and video tokens to enable proper
+    spatial-temporal position encoding in multimodal transformers with RoPE.
+
+    Args:
+        input_ids (torch.Tensor): Input token sequence of shape [batch_size, seq_len]
+                                 Must be LongTensor on CUDA device
+        spatial_merge_size (int): Spatial merge size for patch grouping (must be positive)
+        image_token_id (int): Token ID representing image patches
+        video_token_id (int): Token ID representing video frames
+        vision_start_token_id (int): Token ID marking start of vision sequences
+        tokens_per_second (float): Temporal scaling factor for video sequences (must be positive)
+        image_grid_thw (torch.Tensor, optional): Image grid dimensions of shape [num_images, 3] (T, H, W)
+        video_grid_thw (torch.Tensor, optional): Video grid dimensions of shape [num_videos, 3] (T, H, W)
+        second_per_grid_ts (torch.Tensor, optional): Video time intervals of shape [num_videos]
+        attention_mask (torch.Tensor, optional): Attention mask of shape [batch_size, seq_len]
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: A tuple containing:
+            - position_ids: 3D position indices of shape [3, batch_size, seq_len]
+            - mrope_position_deltas: mRoPE position deltas of shape [batch_size, 1]
+
+    Raises:
+        TypeError: If input_ids is not a torch.Tensor
+        ValueError: If input dimensions are incorrect or tensors not on CUDA
+    """
+    # Input validation
+    if not isinstance(input_ids, torch.Tensor):
+        raise TypeError("input_ids must be a torch.Tensor")
+
+    if input_ids.dim() != 2:
+        raise ValueError("input_ids must be 2D tensor (batch_size, seq_len)")
+
+    if not input_ids.is_cuda:
+        raise ValueError("input_ids must be on CUDA device")
+
+    # Parameter validation
+    if not isinstance(spatial_merge_size, int) or spatial_merge_size <= 0:
+        raise ValueError(
+            f"spatial_merge_size must be positive integer, got {spatial_merge_size}"
+        )
+
+    if not isinstance(tokens_per_second, (int, float)) or tokens_per_second <= 0:
+        raise ValueError(
+            f"tokens_per_second must be positive number, got {tokens_per_second}"
+        )
+
+    return backend.get_rope_index(
+        input_ids,
+        image_grid_thw,
+        video_grid_thw,
+        second_per_grid_ts,
+        attention_mask,
+        spatial_merge_size,
+        image_token_id,
+        video_token_id,
+        vision_start_token_id,
+        float(tokens_per_second),
+    )
+
+
+################################################################################################
+##
+## Fused Rotary Position Embedding
+##
+################################################################################################
+
+
+def rot_pos_emb(
+    inv_freq: torch.Tensor,
+    grid_thw: torch.Tensor,
+    spatial_merge_size: int,
+) -> torch.Tensor:
+    """
+    Compute fused rotary position embeddings using optimized CUDA kernel.
+
+    This function fuses all rotary position embedding computations into a single
+    CUDA kernel for improved performance with spatial-temporal grids.
+
+    Args:
+        inv_freq (torch.Tensor): Inverse frequencies tensor of shape [dim/2]
+                                Contains precomputed 1.0 / (theta ** (torch.arange(0, dim, 2) / dim))
+                                Must be float32 on CUDA device
+        grid_thw (torch.Tensor): Grid dimensions tensor of shape [num_grids, 3]
+                                Each row contains (T, H, W) for temporal, height, width dimensions
+                                Supports int32 or int64 on CUDA device
+        spatial_merge_size (int): Spatial merge size for token grouping (must be positive)
+
+    Returns:
+        torch.Tensor: Rotary position embeddings of shape [total_tokens, dim]
+                     where dim = 2 * len(inv_freq)
+                     First half contains h_pos frequencies, second half contains w_pos frequencies
+
+    Raises:
+        TypeError: If inputs are not torch.Tensor or spatial_merge_size not int
+        ValueError: If tensor dimensions incorrect, not on CUDA, or devices mismatch
+        RuntimeError: If CUDA kernel execution fails
+    """
+    # Type checking
+    if not isinstance(inv_freq, torch.Tensor):
+        raise TypeError(f"inv_freq must be a torch.Tensor, got {type(inv_freq)}")
+
+    if not isinstance(grid_thw, torch.Tensor):
+        raise TypeError(f"grid_thw must be a torch.Tensor, got {type(grid_thw)}")
+
+    # Dimension checking
+    if inv_freq.dim() != 1:
+        raise ValueError(
+            f"inv_freq must be 1-dimensional, got {inv_freq.dim()}D tensor"
+        )
+
+    if grid_thw.dim() != 2:
+        raise ValueError(
+            f"grid_thw must be 2-dimensional, got {grid_thw.dim()}D tensor"
+        )
+
+    if grid_thw.size(1) != 3:
+        raise ValueError(
+            f"grid_thw must have shape [num_grids, 3], got shape {list(grid_thw.shape)}"
+        )
+
+    # Device checking
+    if not inv_freq.is_cuda:
+        raise ValueError("inv_freq must be on CUDA device")
+
+    if not grid_thw.is_cuda:
+        raise ValueError("grid_thw must be on CUDA device")
+
+    # Ensure both tensors are on the same device
+    if inv_freq.device != grid_thw.device:
+        raise ValueError(
+            f"inv_freq and grid_thw must be on the same device, "
+            f"got {inv_freq.device} and {grid_thw.device}"
+        )
+
+    # Parameter validation
+    if not isinstance(spatial_merge_size, int):
+        raise TypeError(
+            f"spatial_merge_size must be an integer, got {type(spatial_merge_size)}"
+        )
+
+    if spatial_merge_size <= 0:
+        raise ValueError(
+            f"spatial_merge_size must be positive, got {spatial_merge_size}"
+        )
+
+    # Ensure inv_freq is float32 (the kernel expects float)
+    if inv_freq.dtype != torch.float32:
+        inv_freq = inv_freq.to(torch.float32)
+
+    # Call the CUDA backend
+    try:
+        return backend.rot_pos_emb(inv_freq, grid_thw, spatial_merge_size)
+    except RuntimeError as e:
+        raise RuntimeError(f"CUDA kernel execution failed: {str(e)}")
+
+
+################################################################################################
+##
+## Fused Window Index Generation
+##
+################################################################################################
+
+
+def get_window_index(
+    grid_thw: torch.Tensor,
+    window_size: int,
+    spatial_merge_size: int,
+    patch_size: int,
+    spatial_merge_unit: int = 1,
+):
+    """
+    Generate window attention indices for Vision Transformer architectures.
+
+    Computes window-based attention indices for hierarchical processing of vision
+    tokens, enabling efficient sliding window attention patterns in ViT models.
+
+    Args:
+        grid_thw (torch.Tensor): Grid specifications of shape [num_grids, 3] (T, H, W)
+                                Must be or will be converted to int32 on CUDA device
+        window_size (int): Window size for attention computation
+        spatial_merge_size (int): Spatial merge size for patch grouping
+        patch_size (int): Size of vision patches in pixels
+        spatial_merge_unit (int, optional): Spatial merging unit size. Defaults to 1.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: A tuple containing:
+            - window_index: Window indices tensor of shape [total_elements]
+            - cu_window_seqlens: Cumulative window sequence lengths of shape [num_windows + 1]
+
+    Raises:
+        AssertionError: If grid_thw dimensions are incorrect
+
+    Note:
+        Returns empty tensors if input grid is empty or no valid windows can be formed.
+        The function automatically converts input to CUDA int32 if needed.
+    """
+    # Input validation
+    assert (
+        grid_thw.dim() == 2 and grid_thw.size(1) == 3
+    ), f"grid_thw must have shape (num_grids, 3), got {grid_thw.shape}"
+
+    # Ensure input is on CUDA and int32 type
+    if not grid_thw.is_cuda:
+        grid_thw = grid_thw.cuda()
+
+    if grid_thw.dtype != torch.int32:
+        grid_thw = grid_thw.to(torch.int32)
+
+    # Calculate vit_merger_window_size
+    vit_merger_window_size = window_size // spatial_merge_size // patch_size
+
+    # Call CUDA backend
+    window_index, cu_window_seqlens = backend.get_window_index(
+        grid_thw,
+        spatial_merge_size,
+        vit_merger_window_size,
+        patch_size,
+        spatial_merge_unit,
+    )
+
+    return window_index, cu_window_seqlens

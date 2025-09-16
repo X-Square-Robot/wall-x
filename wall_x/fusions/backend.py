@@ -297,3 +297,137 @@ def rope_bwd(
     return backend.rope_bwd(
         grad_q_out, grad_k_out, q, k, cos, sin, grad_q, grad_k, mrope_section_doubled
     )
+
+
+def get_rope_index(
+    input_ids: torch.Tensor,
+    image_grid_thw: Optional[torch.Tensor],
+    video_grid_thw: Optional[torch.Tensor],
+    second_per_grid_ts: Optional[torch.Tensor],
+    attention_mask: Optional[torch.Tensor],
+    spatial_merge_size: int,
+    image_token_id: int,
+    video_token_id: int,
+    vision_start_token_id: int,
+    tokens_per_second: float,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Generate position indices for multimodal RoPE (Rotary Position Embedding).
+
+    This function computes 3D position indices for text, image, and video tokens
+    to enable proper spatial-temporal position encoding in multimodal transformers.
+
+    Args:
+        input_ids (torch.Tensor): Input token IDs of shape [batch_size, seq_len]
+        image_grid_thw (torch.Tensor, optional): Image grid specifications of shape [num_images, 3] (T, H, W)
+        video_grid_thw (torch.Tensor, optional): Video grid specifications of shape [num_videos, 3] (T, H, W)
+        second_per_grid_ts (torch.Tensor, optional): Temporal scaling per video grid of shape [num_videos]
+        attention_mask (torch.Tensor, optional): Attention mask of shape [batch_size, seq_len]
+        spatial_merge_size (int): Spatial dimension merge factor for patch grouping
+        image_token_id (int): Token ID representing image patches
+        video_token_id (int): Token ID representing video frames
+        vision_start_token_id (int): Token ID marking vision sequence start
+        tokens_per_second (float): Temporal scaling factor for video sequences
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: A tuple containing:
+            - position_ids: 3D position indices of shape [3, batch_size, seq_len]
+            - mrope_deltas: Position deltas for multimodal RoPE of shape [batch_size, 1]
+
+    Note:
+        When both image_grid_thw and video_grid_thw are None, returns standard
+        text-only position indices based on attention_mask or sequence order.
+    """
+    return backend.rope_index(
+        input_ids,
+        image_grid_thw,
+        video_grid_thw,
+        second_per_grid_ts,
+        attention_mask,
+        spatial_merge_size,
+        image_token_id,
+        video_token_id,
+        vision_start_token_id,
+        tokens_per_second,
+    )
+
+
+def rot_pos_emb(
+    inv_freq: torch.Tensor,
+    grid_thw: torch.Tensor,
+    spatial_merge_size: int,
+) -> torch.Tensor:
+    """
+    Compute fused rotary position embeddings for multimodal grids.
+
+    This function efficiently computes rotary position embeddings for spatial-temporal
+    grids using a fused CUDA kernel, supporting both int32 and int64 grid specifications.
+
+    Args:
+        inv_freq (torch.Tensor): Inverse frequencies for RoPE of shape [dim/2]
+                                Must be float32 dtype on CUDA device
+        grid_thw (torch.Tensor): Grid specifications of shape [num_grids, 3] (T, H, W)
+                                Supports int32 or int64 dtype on CUDA device
+        spatial_merge_size (int): Merge factor for spatial dimensions (must be positive)
+
+    Returns:
+        torch.Tensor: Computed rotary embeddings of shape [total_tokens, dim]
+                     where total_tokens is determined by grid layouts and spatial_merge_size
+
+    Example:
+        >>> inv_freq = torch.randn(64, device='cuda', dtype=torch.float32)  # 128-dim model
+        >>> grids = torch.tensor([[8, 14, 14], [16, 7, 7]], device='cuda', dtype=torch.int32)
+        >>> embeddings = rot_pos_emb(inv_freq, grids, spatial_merge_size=2)
+        >>> print(embeddings.shape)  # [computed_tokens, 128]
+
+    Note:
+        The function automatically dispatches to int32 or int64 implementations
+        based on the dtype of grid_thw. Output is always float32.
+    """
+    return backend.rot_pos_emb(inv_freq, grid_thw, spatial_merge_size)
+
+
+def get_window_index(
+    grid_thw: torch.Tensor,
+    spatial_merge_size: int,
+    vit_merger_window_size: int,
+    patch_size: int,
+    spatial_merge_unit: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Generate window attention indices for Vision Transformer architectures.
+
+    Computes window-based attention indices for hierarchical processing of vision
+    tokens, enabling efficient sliding window attention patterns in ViT models.
+
+    Args:
+        grid_thw (torch.Tensor): Grid specifications of shape [num_grids, 3] (T, H, W)
+                                Must be int32 dtype on CUDA device
+        spatial_merge_size (int): Spatial dimension merge factor
+        vit_merger_window_size (int): Size of attention windows for ViT processing
+        patch_size (int): Size of vision patches in pixels
+        spatial_merge_unit (int): Unit size for spatial merging operations
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: A tuple containing:
+            - window_indices: Flattened window indices of shape [total_elements]
+            - cu_window_seqlens: Cumulative window sequence lengths of shape [num_windows + 1]
+
+    Example:
+        >>> grids = torch.tensor([[1, 14, 14]], device='cuda', dtype=torch.int32)
+        >>> indices, seqlens = get_window_index(
+        ...     grids, spatial_merge_size=2, vit_merger_window_size=7,
+        ...     patch_size=16, spatial_merge_unit=4
+        ... )
+
+    Note:
+        Returns empty tensors if input grid is empty or no valid windows can be formed.
+        The cu_window_seqlens tensor enables efficient batched attention computation.
+    """
+    return backend.get_window_index(
+        grid_thw,
+        spatial_merge_size,
+        vit_merger_window_size,
+        patch_size,
+        spatial_merge_unit,
+    )

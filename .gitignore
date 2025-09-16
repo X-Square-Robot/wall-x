@@ -244,6 +244,7 @@ mlruns/
 # Cache directories
 .cache/
 cache/
+.ruff_cache/
 
 # =============================================================================
 # FONTS AND ASSETS (if not part of the project)

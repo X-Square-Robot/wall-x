@@ -3,6 +3,7 @@ import json
 import time
 import yaml
 import wandb
+import accelerate
 from argparse import ArgumentParser
 from accelerate import (
     Accelerator,
@@ -38,9 +39,32 @@ def setup_accelerator(config):
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator_dataloader_config = DataLoaderConfiguration(dispatch_batches=False)
 
+    if config.get("FSDP2", False):
+        # Use Fully Sharded Data Parallel (FSDP) version 2
+        fsdp_plugin = accelerate.utils.dataclasses.FullyShardedDataParallelPlugin(
+            fsdp_version=2, reshard_after_forward=True
+        )
+        print("[INFO] Using FSDP version 2 for distributed training")
+    else:
+        fsdp_plugin = None
+
+    if config.get("torch_compile", False):
+        # Use Torch Dynamo for compilation
+        dynamo_plugin = accelerate.utils.TorchDynamoPlugin(
+            backend="inductor",
+            mode="default",
+            fullgraph=False,
+            dynamic=False,
+        )
+        print("[INFO] Using Torch Dynamo for compilation")
+    else:
+        dynamo_plugin = None
+
     accelerator = Accelerator(
         kwargs_handlers=[ddp_kwargs],
         mixed_precision="bf16",
+        fsdp_plugin=fsdp_plugin,
+        dynamo_plugin=dynamo_plugin,
         dataloader_config=accelerator_dataloader_config,
         gradient_accumulation_steps=config.get("gradient_accumulation_steps", 1),
     )

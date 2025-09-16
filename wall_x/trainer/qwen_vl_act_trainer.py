@@ -5,11 +5,13 @@ import torch
 import random
 import numpy as np
 import torch.nn as nn
+import torch.distributed as dist
 
 from tqdm import tqdm
 from functools import wraps
 from datetime import datetime
 from torch.optim import AdamW
+from torch.distributed.tensor import distribute_tensor
 from accelerate import Accelerator
 from safetensors.torch import load_file
 from transformers.optimization import get_cosine_with_min_lr_schedule_with_warmup
@@ -769,7 +771,9 @@ class QwenVlAct_Trainer:
         """
         checkpoint_path = self.config["resume"]["ckpt"]
 
-        if self.config.get("resume", {}).get("load_ckpt_only", False):
+        if self.config.get("FSDP2", False):
+            self._load_fsdp_state_dict_with_distribute_tensor()
+        elif self.config.get("resume", {}).get("load_ckpt_only", False):
             # Load only model weights
             ckpt_path = self.config["resume"]["ckpt"] + "/model.safetensors"
             state_dict = load_file(ckpt_path, device="cpu")
@@ -787,6 +791,48 @@ class QwenVlAct_Trainer:
             self.accelerator.load_state(checkpoint_path)
 
         self.print_rank0(f"Resumed from checkpoint: {checkpoint_path}")
+
+    def _load_fsdp_state_dict_with_distribute_tensor(self):
+
+        rank = dist.get_rank() if dist.is_initialized() else 0
+
+        full_sd = load_file(
+            self.config["resume"]["ckpt"] + "/model.safetensors", device="cpu"
+        )
+        meta_sharded_sd = self.model.state_dict()
+        sharded_sd = {}
+
+        def find_matching_key(target_key, available_keys):
+            if target_key in available_keys:
+                return target_key
+            prefixed_key = f"_orig_mod.{target_key}"
+            if prefixed_key in available_keys:
+                return prefixed_key
+            if target_key.startswith("_orig_mod."):
+                unprefixed_key = target_key[len("_orig_mod.") :]
+                if unprefixed_key in available_keys:
+                    return unprefixed_key
+            return None
+
+        for param_name, full_tensor in full_sd.items():
+            matching_key = find_matching_key(param_name, meta_sharded_sd.keys())
+            if matching_key is None:
+                if rank == 0:
+                    print(
+                        f"[Rank {rank}] Warning: Parameter not found:",
+                        param_name,
+                        flush=True,
+                    )
+                continue
+            sharded_meta_param = meta_sharded_sd[matching_key]
+            sharded_tensor = distribute_tensor(
+                full_tensor,
+                sharded_meta_param.device_mesh,
+                sharded_meta_param.placements,
+            )
+            sharded_sd[matching_key] = nn.Parameter(sharded_tensor)
+
+        self.model.load_state_dict(sharded_sd, assign=True, strict=False)
 
     def log_l1_details(self, all_label, all_pred, all_task, all_dof_mask):
         """

@@ -36,6 +36,9 @@ ext_modules = [
             "csrc/dual_asym_grouped_gemm.cu",
             "csrc/permute.cu",
             "csrc/rope.cu",
+            "csrc/rope_index.cu",
+            "csrc/rot_pos.cu",
+            "csrc/window_index.cu",
         ],
         include_dirs=[f"{cwd}/3rdparty/cutlass/include/", f"{cwd}/csrc"],
         extra_compile_args={
@@ -47,7 +50,7 @@ ext_modules = [
 
 setup(
     name="wall_x",
-    version="1.0.0",
+    version="1.0.1",
     author="X2Robot Team",
     classifiers=[
         "Programming Language :: Python :: 3",

@@ -28,6 +28,10 @@ batch_size_per_gpu: 8
 padding_side: left
 epoch_save_interval: 10
 
+# Training optimization settings
+FSDP2: True
+torch_compile: False
+
 # Robot configuration - Define degrees of freedom for each component
 dof_config:
   follow_left_ee_cartesian_pos: 3      # Left end-effector Cartesian position

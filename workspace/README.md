@@ -1,15 +1,28 @@
-# Training Configuration Guide
+# Training Guide
 
-This document explains the key configuration parameters that can be modified for Wall-X training.
+This document explains the key configuration parameters and memory requirements for Wall-X training.
 
 ## Quick Start Checklist
-1. **Update run.sh**: Set `code_dir` and `config_path` to your actual paths
-2. **Configure GPUs**: Set `CUDA_VISIBLE_DEVICES` for your available GPUs
-3. **Update config paths**: Replace all `/path/to/` placeholders in `config_qact.yml` with actual paths
-4. **Configure robot**: Set `dof_config` and `agent_pos_config` for your robot
-5. **Set dataset**: Choose appropriate `repo_id` for your dataset
-6. **Adjust batch size**: Set `batch_size_per_gpu` based on GPU memory
-7. **Run training**: Execute `bash ./workspace/lerobot_example/run.sh`
+
+### 🚀 **Step 1: Download Pre-trained Model**
+Choose one of the available models:
+- **WALL-OSS-FLOW**: https://huggingface.co/x-square-robot/wall-oss-flow
+- **WALL-OSS-FAST**: https://huggingface.co/x-square-robot/wall-oss-fast
+
+### ⚙️ **Step 2: Configure Environment**
+- Update `run.sh`: Set `code_dir` and `config_path` to your actual paths
+- Set `CUDA_VISIBLE_DEVICES` for your available GPUs
+
+### 📝 **Step 3: Update Configuration Files**
+- Replace all `/path/to/` placeholders in `config_qact.yml` with actual paths
+- Configure robot settings: `dof_config` and `agent_pos_config`
+- Set dataset: Choose appropriate `repo_id`
+- Adjust `batch_size_per_gpu` based on your GPU memory
+
+### ▶️ **Step 4: Start Training**
+```bash
+bash ./workspace/lerobot_example/run.sh
+```
 
 ## Enable FAST tokenizer
 To fine-tune using the FAST tokenizer, please download the repository and update the `action_tokenizer_path`. Make sure to set `use_fast_tokenizer` to `true`:
@@ -37,6 +50,10 @@ action_tokenizer_path: "/path/to/fast/"             # Must set if use_fast_token
 - `gradient_accumulation_steps`: Gradient accumulation steps
 - `num_training_steps`: Total training steps
 - `num_epoch`: Number of training epochs
+
+### Training Optimization Settings
+- `FSDP2`: Enable FSDP2 for distributed training (default: True) - **Recommended for multi-GPU**
+- `torch_compile`: Enable PyTorch compilation optimization (default: False)
 
 ## Robot Configuration (Modify for Your Robot)
 
@@ -67,6 +84,21 @@ Keep `agent_pos_config` consistent with `dof_config`.
 - `resume.ckpt`: Path to checkpoint for resuming training
 - `resume.load_ckpt_only`: Only load model weights, not optimizer state
 
-## Performance Settings (Optional)
-- `profile`: Enable PyTorch profiling (true/false)
-- `padding_side`: Token padding side (left/right)
+## Memory Usage
+
+Below are the memory consumption benchmarks for different training configurations using the `lerobot/aloha_mobile_cabinet` dataset:
+
+| Dataset | Batch Size | FSDP2 | Torch Compile | Num GPUs | Max Allocated Memory |
+|---------|------------|--------|---------------|----------|---------------------|
+| lerobot/aloha_mobile_cabinet | 1 | ❌ | ❌ | 1 | 40.11G |
+| lerobot/aloha_mobile_cabinet | 1 | ❌ | ❌ | 8 | 48.02G |
+| lerobot/aloha_mobile_cabinet | 1 | ✅ | ❌ | 2 | 43.70G |
+| lerobot/aloha_mobile_cabinet | 1 | ✅ | ❌ | 8 | 24.96G |
+| lerobot/aloha_mobile_cabinet | 1 | ✅ | ✅ | 8 | 24.21G |
+
+
+**Hardware Recommendations:**
+
+- For single GPU training: Ensure at least 48GB VRAM (e.g., RTX 6000 Ada, A6000)
+- For multi-GPU training: Enable FSDP2 for optimal memory distribution
+- For production training: Use FSDP2 + Torch Compile for best memory efficiency

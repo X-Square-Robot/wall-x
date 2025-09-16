@@ -424,8 +424,9 @@ def load_lerobot_data(
 
     # repo_id = "lerobot/aloha_mobile_cabinet"
     repo_id = lerobot_config.get("repo_id", "lerobot/aloha_mobile_cabinet")
+    root = lerobot_config.get("root", None)
     dataset = LeRobotDataset(
-        repo_id, delta_timestamps=delta_timestamps, video_backend="pyav"
+        repo_id, root=root, delta_timestamps=delta_timestamps, video_backend="pyav"
     )
 
     if rank == 0:

@@ -1244,12 +1244,17 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 or self.rope_deltas is None
                 or (past_key_values is None or past_key_values.get_seq_length() == 0)
             ):
-                position_ids, rope_deltas = self.get_rope_index(
-                    input_ids,
-                    image_grid_thw,
-                    video_grid_thw,
-                    second_per_grid_ts,
-                    attention_mask,
+                position_ids, rope_deltas = ops.get_rope_index(
+                    input_ids=input_ids,
+                    image_grid_thw=image_grid_thw,
+                    video_grid_thw=video_grid_thw,
+                    second_per_grid_ts=second_per_grid_ts,
+                    attention_mask=attention_mask,
+                    spatial_merge_size=self.config.vision_config.spatial_merge_size,
+                    image_token_id=self.config.image_token_id,
+                    video_token_id=self.config.video_token_id,
+                    vision_start_token_id=self.config.vision_start_token_id,
+                    tokens_per_second=self.config.vision_config.tokens_per_second,
                 )
                 self.rope_deltas = rope_deltas
             # Use previously calculated rope deltas to get correct position IDs
@@ -1720,12 +1725,17 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 or self.rope_deltas is None
                 or (past_key_values is None or past_key_values.get_seq_length() == 0)
             ):
-                position_ids, rope_deltas = self.get_rope_index(
-                    input_ids,
-                    image_grid_thw,
-                    video_grid_thw,
-                    second_per_grid_ts,
-                    attention_mask,
+                position_ids, rope_deltas = ops.get_rope_index(
+                    input_ids=input_ids,
+                    image_grid_thw=image_grid_thw,
+                    video_grid_thw=video_grid_thw,
+                    second_per_grid_ts=second_per_grid_ts,
+                    attention_mask=attention_mask,
+                    spatial_merge_size=self.config.vision_config.spatial_merge_size,
+                    image_token_id=self.config.image_token_id,
+                    video_token_id=self.config.video_token_id,
+                    vision_start_token_id=self.config.vision_start_token_id,
+                    tokens_per_second=self.config.vision_config.tokens_per_second,
                 )
                 self.rope_deltas = rope_deltas
             # Use previously calculated rope deltas to get correct position IDs
@@ -1882,6 +1892,17 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             )
             dof_mask = dof_mask.to(inputs_embeds.device).to(inputs_embeds.dtype)
 
+            # Calculate token distribution across MoE expert groups
+            group_size = torch.zeros(
+                self.config.num_experts, dtype=torch.long, device="cpu"
+            )
+            for i in range(self.config.num_experts):
+                group_size[i] = (moe_token_types == i).sum()
+
+            # Calculate start and end indices for each expert group
+            start_indices = torch.cumsum(group_size, dim=0) - group_size
+            end_indices = torch.cumsum(group_size, dim=0)
+
             def step(timestep, noisy_action):
                 """
                 Single denoising step for diffusion process.
@@ -1915,6 +1936,8 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                     past_key_values=past_key_values,
                     inputs_embeds=temp_inputs_embeds,
                     moe_token_types=moe_token_types,
+                    start_indices=start_indices,
+                    end_indices=end_indices,
                     use_cache=True,
                     output_attentions=False,
                     output_hidden_states=False,

@@ -30,7 +30,7 @@ By creating a direct feedback loop between the model's decisions and the body's 
 This repository provides the training and inference code that supports our WALL series open-source embodied foundation models. It includes end-to-end pipelines for data preparation (LeRobot), model configuration, flow-matching and FAST action branches, and evaluation utilities for real and simulated robots.
 
 ## News
-- We introduce [**WALL-OSS**](https://x2robot.com/en/research/68bc2cde8497d7f238dde690), an end-to-end embodied foundation model that leverages large-scale multimodal pretraining to achieve (1) embodiment-aware vision–language understanding, (2) strong language–action association, and (3) robust manipulation capability.
+- We introduce [**WALL-OSS: Igniting VLMs toward the Embodied Space**](https://x2robot.com/en/research/68bc2cde8497d7f238dde690), an end-to-end embodied foundation model that leverages large-scale multimodal pretraining to achieve (1) embodiment-aware vision–language understanding, (2) strong language–action association, and (3) robust manipulation capability.
 
 ## Models
 - WALL-OSS-FLOW: https://huggingface.co/x-square-robot/wall-oss-flow
@@ -112,11 +112,10 @@ python ./scripts/vqa_inference.py
 If you find WALL-OSS models useful, please cite:
 
 ```bibtex
-@misc{walloss_paper_2025,
-  title        = {WALL-OSS: Igniting VLMs toward the Embodied Space},
-  author       = {X Square Robot},
-  year         = {2025},
-  howpublished = {\url{https://x2robot.cn-wlcb.ufileos.com/wall_oss.pdf}},
-  note         = {White paper}
+@article{zhai2025igniting,
+  title   = {Igniting VLMs Toward the Embodied Space},
+  author  = {Zhai, Andy and Liu, Brae and Fang, Bruno and Cai, Chalse and Ma, Ellie and Yin, Ethan and Wang, Hao and Zhou, Hugo and Wang, James and Shi, Lights and Liang, Lucy and Wang, Make and Wang, Qian and Gan, Roy and Yu, Ryan and Li, Shalfun and Liu, Starrick and Chen, Sylas and Chen, Vincent and Xu, Zach},
+  journal = {arXiv preprint arXiv:2509.11766},
+  year    = {2025}
 }
 ```

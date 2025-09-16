@@ -560,15 +560,17 @@ class Qwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VLPreTrainedModel):
             `torch.Tensor`: hidden_states.
         """
         hidden_states = self.patch_embed(hidden_states)
-        rotary_pos_emb = self.rot_pos_emb(grid_thw)
-        window_index, cu_window_seqlens = self.get_window_index(grid_thw)
-        window_index = window_index.to(hidden_states.device)
-        cu_window_seqlens = torch.tensor(
-            cu_window_seqlens,
-            device=hidden_states.device,
-            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+        rotary_pos_emb = ops.rot_pos_emb(
+            self.rotary_pos_emb.inv_freq, grid_thw, self.spatial_merge_size
         )
-        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+
+        window_index, cu_window_seqlens = ops.get_window_index(
+            grid_thw=grid_thw,
+            window_size=self.window_size,
+            spatial_merge_size=self.spatial_merge_size,
+            patch_size=self.patch_size,
+            spatial_merge_unit=self.spatial_merge_unit,
+        )
 
         seq_len, _ = hidden_states.size()
         hidden_states = hidden_states.reshape(

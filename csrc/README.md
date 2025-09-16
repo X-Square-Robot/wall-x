@@ -1,6 +1,6 @@
 # Fusion Operators (CSRC)
 
-High-performance CUDA kernels for accelerating model training.
+High-performance CUDA kernels for accelerating model training, with specialized support for multimodal and MoE architectures.
 
 ## Operators
 
@@ -16,7 +16,12 @@ High-performance CUDA kernels for accelerating model training.
 ### Multimodal RoPE
 - `rope`: Rotary Position Embedding forward pass
 - `rope_bwd`: RoPE backward pass
-- Support for multimodal inputs with configurable sections
+- `rope_index`: Generates position indices for multimodal RoPE
+- `rot_pos_emb`: Fused rotary position embedding computation
+
+### Vision Transformer Optimization
+- `get_window_index`: Window attention index generation
+
 
 ## Acknowledgments
 
