@@ -68,13 +68,15 @@ if __name__ == "__main__":
     wrapper = VQAWrapper(model_path=MODEL_PATH_FOR_MODULE_TEST)
 
     try:
-        test_image_url = "https://www.ilankelman.org/stopsigns/australia.jpg"
-        test_question = "What is written on the sign?"
+        test_question = "To move the red block in the plate with same color, what should you do next? Think step by step."
 
-        # img = Image.open("/path/to/your/local/image.jpg").convert("RGB")
-        import requests
+        # Local Image
+        img = Image.open("/path/to/wall-x/assets/cot_example_frame.png").convert("RGB")
+        # Internet Image
+        # import requests
+        # test_image_url = "https://www.ilankelman.org/stopsigns/australia.jpg"
+        # img = Image.open(requests.get(test_image_url, stream=True).raw).convert("RGB")
 
-        img = Image.open(requests.get(test_image_url, stream=True).raw).convert("RGB")
         answer = wrapper.generate(img, test_question)
 
         print("model answer:", answer)

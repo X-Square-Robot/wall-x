@@ -55,6 +55,11 @@ action_tokenizer_path: "/path/to/fast/"             # Must set if use_fast_token
 - `FSDP2`: Enable FSDP2 for distributed training (default: True) - **Recommended for multi-GPU**
 - `torch_compile`: Enable PyTorch compilation optimization (default: False)
 
+**⚠️ Important Note on torch_compile:**
+- **Benefits**: Enabling `torch_compile` can significantly improve training efficiency
+- **Requirements**: Requires that the data input shape is always consistent throughout training
+- **Caution**: If you don't have sufficient understanding of torch compile, please **DO NOT** enable it as it may cause unexpected issues with dynamic input shapes
+
 ## Robot Configuration (Modify for Your Robot)
 
 ### DOF Configuration
@@ -101,4 +106,3 @@ Below are the memory consumption benchmarks for different training configuration
 
 - For single GPU training: Ensure at least 48GB VRAM (e.g., RTX 6000 Ada, A6000)
 - For multi-GPU training: Enable FSDP2 for optimal memory distribution
-- For production training: Use FSDP2 + Torch Compile for best memory efficiency
