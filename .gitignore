@@ -196,7 +196,6 @@ bin/
 # Media files
 *.jpg
 *.jpeg
-*.png
 *.gif
 *.mp4
 *.avi
