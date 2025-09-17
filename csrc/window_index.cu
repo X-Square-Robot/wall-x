@@ -234,13 +234,11 @@ std::tuple<torch::Tensor, torch::Tensor> get_window_index_cuda(
         max_grid_t = std::max(max_grid_t, grid_thw_cpu[i][0].item<int>());
     }
 
-    int *d_grid_info;
-    int *d_global_totals;
-    int *d_window_counts;
+    auto grid_info_tensor = torch::empty({num_grids, 6}, options);
+    auto global_totals_tensor = torch::zeros({2}, options);
 
-    cudaMalloc(&d_grid_info, num_grids * 6 * sizeof(int));
-    cudaMalloc(&d_global_totals, 2 * sizeof(int));
-    cudaMemset(d_global_totals, 0, 2 * sizeof(int));
+    int *d_grid_info = grid_info_tensor.data_ptr<int>();
+    int *d_global_totals = global_totals_tensor.data_ptr<int>();
 
     int threads1 = 256;
     int blocks1 = (num_grids + threads1 - 1) / threads1;
@@ -248,15 +246,12 @@ std::tuple<torch::Tensor, torch::Tensor> get_window_index_cuda(
         d_grid_thw, d_grid_info, d_global_totals,
         num_grids, spatial_merge_size, vit_merger_window_size);
 
-    int h_totals[2];
-    cudaMemcpy(h_totals, d_global_totals, 2 * sizeof(int), cudaMemcpyDeviceToHost);
-    int total_elements = h_totals[0];
-    int total_windows = h_totals[1];
+    auto totals_cpu = global_totals_tensor.cpu();
+    int total_elements = totals_cpu[0].item<int>();
+    int total_windows = totals_cpu[1].item<int>();
 
     if (total_elements == 0 || total_windows == 0)
     {
-        cudaFree(d_grid_info);
-        cudaFree(d_global_totals);
         return std::make_tuple(
             torch::empty({0}, options),
             torch::zeros({1}, options));
@@ -268,7 +263,8 @@ std::tuple<torch::Tensor, torch::Tensor> get_window_index_cuda(
     int *d_window_indices = window_indices.data_ptr<int>();
     int *d_cu_window_seqlens = cu_window_seqlens.data_ptr<int>();
 
-    cudaMalloc(&d_window_counts, total_windows * sizeof(int));
+    auto window_counts_tensor = torch::empty({total_windows}, options);
+    int *d_window_counts = window_counts_tensor.data_ptr<int>();
 
     dim3 blocks2(max_grid_t, num_grids);
     dim3 threads2(256);
@@ -285,14 +281,6 @@ std::tuple<torch::Tensor, torch::Tensor> get_window_index_cuda(
     generate_window_indices<<<blocks2, threads2>>>(
         d_grid_thw, d_grid_info, d_cu_window_seqlens, d_window_indices,
         vit_merger_window_size, spatial_merge_unit, num_grids);
-
-    cudaDeviceSynchronize();
-    cudaError_t error = cudaGetLastError();
-    TORCH_CHECK(error == cudaSuccess, "CUDA error: ", cudaGetErrorString(error));
-
-    cudaFree(d_grid_info);
-    cudaFree(d_global_totals);
-    cudaFree(d_window_counts);
 
     return std::make_tuple(window_indices, cu_window_seqlens);
 }

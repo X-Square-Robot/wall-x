@@ -455,7 +455,6 @@ void launch_multimodal_rope_forward(
     torch::Tensor q_out, torch::Tensor k_out,
     std::vector<int> mrope_section_doubled)
 {
-
     cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
 
     int batch_size = q.size(0);
@@ -477,10 +476,14 @@ void launch_multimodal_rope_forward(
     {
         data_type = 2;
     }
-    int *d_mrope_section_doubled;
-    cudaMalloc(&d_mrope_section_doubled, 3 * sizeof(int));
-    cudaMemcpyAsync(d_mrope_section_doubled, mrope_section_doubled.data(), 3 * sizeof(int),
-                    cudaMemcpyHostToDevice, stream);
+
+    auto mrope_tensor = torch::from_blob(
+        mrope_section_doubled.data(),
+        {3},
+        torch::TensorOptions().dtype(torch::kInt32)
+    ).to(q.device(), /*non_blocking=*/true);
+
+    int *d_mrope_section_doubled = static_cast<int*>(mrope_tensor.data_ptr());
 
     switch (data_type)
     {
@@ -511,7 +514,6 @@ void launch_multimodal_rope_backward(
     torch::Tensor grad_q, torch::Tensor grad_k,
     std::vector<int> mrope_section_doubled)
 {
-
     cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
 
     int batch_size = q.size(0);
@@ -533,10 +535,14 @@ void launch_multimodal_rope_backward(
     {
         data_type = 2;
     }
-    int *d_mrope_section_doubled;
-    cudaMalloc(&d_mrope_section_doubled, 3 * sizeof(int));
-    cudaMemcpyAsync(d_mrope_section_doubled, mrope_section_doubled.data(), 3 * sizeof(int),
-                    cudaMemcpyHostToDevice, stream);
+
+    auto mrope_tensor = torch::from_blob(
+        mrope_section_doubled.data(),
+        {3},
+        torch::TensorOptions().dtype(torch::kInt32)
+    ).to(q.device(), /*non_blocking=*/true);
+
+    int *d_mrope_section_doubled = static_cast<int*>(mrope_tensor.data_ptr());
 
     switch (data_type)
     {
