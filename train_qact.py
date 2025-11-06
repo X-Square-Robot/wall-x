@@ -3,6 +3,7 @@ import json
 import time
 import yaml
 import wandb
+import torch
 import accelerate
 from argparse import ArgumentParser
 from accelerate import (
@@ -10,6 +11,9 @@ from accelerate import (
     DistributedDataParallelKwargs,
     DataLoaderConfiguration,
 )
+from torch.distributed.fsdp import MixedPrecisionPolicy
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+from functools import partial
 
 from wall_x.trainer.qwen_vl_act_trainer import QwenVlAct_Trainer
 
@@ -40,11 +44,52 @@ def setup_accelerator(config):
     accelerator_dataloader_config = DataLoaderConfiguration(dispatch_batches=False)
 
     if config.get("FSDP2", False):
-        # Use Fully Sharded Data Parallel (FSDP) version 2
-        fsdp_plugin = accelerate.utils.dataclasses.FullyShardedDataParallelPlugin(
-            fsdp_version=2, reshard_after_forward=True
+        # Import model classes for auto wrap policy
+        from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl_act import (
+            Qwen2_5_VLDecoderLayer_with_MoE
         )
-        print("[INFO] Using FSDP version 2 for distributed training")
+        from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl import (
+            Qwen2_5_VLVisionBlock
+        )
+        
+        # IMPORTANT: MixedPrecisionPolicy configuration for selective mixed precision
+        # 
+        # The strategy:
+        # 1. param_dtype: The dtype for model parameters (weights, biases)
+        # 2. reduce_dtype: The dtype for gradient all-reduce operations
+        #
+        # With FSDP2, MixedPrecisionPolicy is applied to ALL wrapped modules.
+        # To keep specific layers (LayerNorm, ActionProcessor) in fp32:
+        # - We apply bf16 policy globally here
+        # - Then model.to_bfloat16_for_selected_params() converts specific params back to fp32
+        # - This happens BEFORE FSDP wrapping in the trainer
+        mixed_precision_policy = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,  # Store parameters in bf16 (after selective conversion)
+            reduce_dtype=torch.bfloat16,  # Reduce gradients in bf16 for efficiency
+        )
+        
+        # Auto wrap policy: wrap transformer layers as separate FSDP units
+        # This enables efficient sharding and memory usage
+        # Note: We DON'T wrap LayerNorm or ActionProcessor here - they stay with their parent
+        auto_wrap_policy = partial(
+            transformer_auto_wrap_policy,
+            transformer_layer_cls={
+                Qwen2_5_VLDecoderLayer_with_MoE,  # Wrap decoder layers (will be bf16 except LayerNorms)
+                Qwen2_5_VLVisionBlock,             # Wrap vision blocks (will be bf16 except LayerNorms)
+            },
+        )
+        
+        # Use Fully Sharded Data Parallel (FSDP) version 2 with mixed precision
+        fsdp_plugin = accelerate.utils.dataclasses.FullyShardedDataParallelPlugin(
+            fsdp_version=2,
+            reshard_after_forward=True,
+            auto_wrap_policy=auto_wrap_policy,
+            mixed_precision_policy=mixed_precision_policy,
+        )
+        print("[INFO] Using FSDP version 2 with selective mixed precision")
+        print("[INFO] Wrapping as separate FSDP units: Qwen2_5_VLDecoderLayer_with_MoE, Qwen2_5_VLVisionBlock")
+        print("[INFO] MixedPrecisionPolicy: param_dtype=bf16, reduce_dtype=bf16")
+        print("[INFO] LayerNorms and action_preprocessor will be kept in fp32 via model.to_bfloat16_for_selected_params()")
     else:
         fsdp_plugin = None
 

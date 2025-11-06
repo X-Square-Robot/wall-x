@@ -185,7 +185,7 @@ class SinusoidalPosEmb(nn.Module):
         device = x.device
         half_dim = self.dim // 2
         emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = torch.exp(torch.arange(half_dim, device=device, dtype=torch.float64) * -emb)
         emb = x[:, None] * emb[None, :]
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
@@ -307,7 +307,8 @@ class ActionProcessor(nn.Module):
             torch.Tensor: Sampled timesteps of shape [batch_size]
         """
         sample = self.beta_dist.sample([batch_size]).to(device=device, dtype=dtype)
-        time = (1 - sample) / self.s
+        # time = (self.s - sample) / self.s
+        time = (1 - sample) * self.s
         return time
 
     def proprioception_proj(
@@ -364,40 +365,42 @@ class ActionProcessor(nn.Module):
                 - action_embeddings: Processed action features of shape [batch_size, seq_len, hidden_size]
                 - flow_target: Flow matching target (action_chunk - noise) for loss computation
         """
-        batch_size = action_chunk.shape[0]
-        device = action_chunk.device
-        dtype = action_chunk.dtype
+        weight_dtype = self.w1.weight.dtype
+        with torch.autocast("cuda", dtype=weight_dtype):
+            batch_size = action_chunk.shape[0]
+            device = action_chunk.device
+            dtype = action_chunk.dtype
 
-        # 1. Add noise to action sequences using flow matching
-        noise = torch.randn_like(action_chunk)
-        time = self.sample_time(batch_size, device, dtype)
-        t = time.unsqueeze(-1).unsqueeze(-1)  # Broadcast to match action dimensions
+            # 1. Add noise to action sequences using flow matching
+            noise = torch.randn_like(action_chunk)
+            time = self.sample_time(batch_size, device, dtype)
+            time_expanded = time.unsqueeze(-1).unsqueeze(-1)  # Broadcast to match action dimensions
 
-        # Linear interpolation between noise and action (flow matching)
-        noisy_action = (1 - t) * noise + t * action_chunk
-        flow = action_chunk - noise  # Flow target for loss computation
+            # Linear interpolation between noise and action (flow matching)
+            noisy_action = (1 - time_expanded) * noise + time_expanded * action_chunk
+            flow = action_chunk - noise  # Flow target for loss computation
 
-        # 2. Generate sinusoidal positional encoding for timesteps
-        time_embed = self.time_embed(time)
+            # 2. Generate sinusoidal positional encoding for timesteps
+            time_embed = self.time_embed(time).to(weight_dtype)
 
-        # 3. Project noisy actions with DOF mask to hidden space
-        if dof_mask is not None:
-            noisy_action = torch.cat([noisy_action, dof_mask], dim=-1)
+            # 3. Project noisy actions with DOF mask to hidden space
+            if dof_mask is not None:
+                noisy_action = torch.cat([noisy_action, dof_mask], dim=-1)
 
-        noisy_action = noisy_action.to(dtype=self.w1.weight.dtype)
-        action_embed = self.w1(noisy_action)
+            noisy_action = noisy_action.to(dtype=weight_dtype)
+            action_embed = self.w1(noisy_action)
 
-        # Repeat time embedding for each sequence position
-        time_embed = (
-            time_embed.unsqueeze(1)
-            .repeat(1, action_embed.shape[1], 1)
-            .to(dtype=self.w2.weight.dtype)
-        )
+            # Repeat time embedding for each sequence position
+            time_embed = (
+                time_embed.unsqueeze(1)
+                .repeat(1, action_embed.shape[1], 1)
+                .to(dtype=weight_dtype)
+            )
 
-        # Combine action and temporal embeddings
-        concat_embed = torch.cat([action_embed, time_embed], dim=-1)
-        concat_embed = self.w2(concat_embed)
-        embed = self.w3(self.act_fn(concat_embed))
+            # Combine action and temporal embeddings
+            concat_embed = torch.cat([action_embed, time_embed], dim=-1)
+            concat_embed = self.w2(concat_embed)
+            embed = self.w3(self.act_fn(concat_embed))
 
         return embed, flow
 
@@ -415,26 +418,29 @@ class ActionProcessor(nn.Module):
         Returns:
             torch.Tensor: Processed action embeddings of shape [batch_size, seq_len, hidden_size]
         """
-        # Concatenate noisy action with DOF mask if provided
-        if dof_mask is not None:
-            noisy_action = torch.cat([noisy_action, dof_mask], dim=-1)
+        weight_dtype = self.w1.weight.dtype
+        with torch.autocast("cuda", dtype=weight_dtype):
+            # Concatenate noisy action with DOF mask if provided
+            if dof_mask is not None:
+                noisy_action = torch.cat([noisy_action, dof_mask], dim=-1)
+            noisy_action = noisy_action.to(dtype=weight_dtype)
 
-        # Generate timestep embeddings
-        time_embed = self.time_embed(timestep)  # [batch_size, hidden_size]
+            # Generate timestep embeddings
+            time_embed = self.time_embed(timestep)  # [batch_size, hidden_size]
 
-        # Project noisy actions
-        action_embed = self.w1(noisy_action)
+            # Project noisy actions
+            action_embed = self.w1(noisy_action)
 
-        # Broadcast time embeddings to sequence length
-        time_embed = time_embed.unsqueeze(1).repeat(1, action_embed.shape[1], 1)
-        time_embed = time_embed.to(device=noisy_action.device).to(
-            dtype=noisy_action.dtype
-        )
+            # Broadcast time embeddings to sequence length
+            time_embed = time_embed.unsqueeze(1).repeat(1, action_embed.shape[1], 1)
+            time_embed = time_embed.to(device=noisy_action.device).to(
+                dtype=weight_dtype
+            )
 
-        # Combine embeddings and process through MLP
-        concat_embed = torch.cat([action_embed, time_embed], dim=-1)
-        concat_embed = self.w2(concat_embed)
-        embed = self.w3(self.act_fn(concat_embed))
+            # Combine embeddings and process through MLP
+            concat_embed = torch.cat([action_embed, time_embed], dim=-1)
+            concat_embed = self.w2(concat_embed)
+            embed = self.w3(self.act_fn(concat_embed))
 
         return embed
 

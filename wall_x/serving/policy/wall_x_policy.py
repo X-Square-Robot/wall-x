@@ -58,7 +58,7 @@ class WallXPolicy(BasePolicy):
         self.model.eval()
         self.model = self.model.to(device)
 
-        self.model = self.model.bfloat16()
+        self.model.to_bfloat16_for_selected_params()
 
         # hard code the action dim to 20 for align to wall-x configuration
         self.fixed_action_dim = 20

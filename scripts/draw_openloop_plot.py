@@ -40,7 +40,7 @@ if __name__ == "__main__":
     )
     model.eval()
     model = model.to("cuda")
-    model = model.bfloat16()
+    model.to_bfloat16_for_selected_params()
 
     # get test dataloader
     dataload_config = get_data_configs(config["data"])

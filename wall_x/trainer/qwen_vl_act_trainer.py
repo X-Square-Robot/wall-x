@@ -528,8 +528,8 @@ class QwenVlAct_Trainer:
                     else None
                 ),
             )
+            model.to_bfloat16_for_selected_params()
             self.processor = model.processor
-            model = model.to(torch.bfloat16)
         elif model_type == "qwen2_5":
 
             config = Qwen2_5_VLConfig.from_pretrained(
@@ -587,7 +587,9 @@ class QwenVlAct_Trainer:
                 model, self.config["pretrained_wallx_path"]
             )
             model.resize_token_embeddings(len(self.processor.tokenizer))
-            model = model.to(torch.bfloat16)
+            # Use selective bf16 conversion for both FSDP2 and non-FSDP2
+            # This keeps LayerNorms and action_preprocessor in fp32 for numerical stability
+            model.to_bfloat16_for_selected_params()
         else:
             raise NotImplementedError(f"Invalid model type: {model_type}")
 

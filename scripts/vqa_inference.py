@@ -28,7 +28,10 @@ class VQAWrapper(object):
             model_path, train_config=train_config
         )
         if self.device == "cuda":
-            model = model.to(self.device, dtype=torch.bfloat16)
+            model = model.to(self.device)
+            # Use selective bf16 conversion regardless of FSDP2 setting for inference
+            # This keeps LayerNorms and action_preprocessor in fp32 for numerical stability
+            model.to_bfloat16_for_selected_params()
         else:
             model.to(self.device)
         model.eval()
