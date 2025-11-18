@@ -17,11 +17,6 @@ import matplotlib.pyplot as plt
 import os
 
 from wall_x.model.action_head import Normalizer
-from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl_act import (
-    Qwen2_5_VLMoEForAction,
-)
-from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
-from wall_x.utils.constant import action_statistic_dof
 
 try:
     import msgpack
@@ -45,17 +40,20 @@ logger = logging.getLogger(__name__)
 class WallXClient:
     """Client for connecting to Wall-X model server."""
 
-    def __init__(self, config_path: str, uri: str = "ws://localhost:8000"):
+    def __init__(self, config_path: str, uri: str = "ws://localhost:8000", norm_stats_path: str = "x2_norm_stats.json"):
         """Initialize client.
 
         Args:
+            config_path: Path to train config file
             uri: WebSocket URI of the server (e.g., ws://localhost:8000)
+            norm_stats_path: Path to normalization stats file
         """
         self.uri = uri
         self.websocket = None
         self.metadata = None
         self._loop = None
         self._thread = None
+        self.norm_stats_path = norm_stats_path
 
         with open(config_path, "r") as f:
             self.train_config = yaml.load(f, Loader=yaml.FullLoader)
@@ -166,20 +164,58 @@ class WallXClient:
         return result
 
     def init_normalizer(self, train_config):
-        customized_dof_config = train_config["customized_robot_config"][
-            "customized_dof_config"
-        ]
-        customized_agent_pos_config = train_config["customized_robot_config"][
-            "customized_agent_pos_config"
-        ]
-        Qwen2_5_VLMoEForAction._set_customized_config(train_config)
+        dof_config = {
+            "biarm_eed_with_base": 20
+        }
 
-        self.normalizer_action = Normalizer(
-            action_statistic_dof, customized_dof_config
-        ).to("cuda")
-        self.normalizer_propri = Normalizer(
-            action_statistic_dof, customized_agent_pos_config
-        ).to("cuda")
+        agent_pos_config = {
+            "biarm_eed_with_base": 20
+        }
+
+        import numpy as np
+
+        from wall_x.data.utils import load_norm_stats
+
+        norm_stats = load_norm_stats(self.norm_stats_path, "x2")
+
+        action_min = norm_stats["action"].min.numpy().tolist()
+        action_delta = norm_stats["action"].delta.numpy().tolist()
+        state_min = norm_stats["state"].min.numpy().tolist()
+        state_delta = norm_stats["state"].delta.numpy().tolist()
+
+        dof_key = []
+        agent_pos_key = []
+        dof_value = []
+        agent_pos_value = []
+        stats_dict = {}
+        for k, v in dof_config.items():
+            dof_key.append(k)
+            dof_value.append(v)
+        for k, v in agent_pos_config.items():
+            agent_pos_key.append(k)
+            agent_pos_value.append(v)
+
+        dof_idx = np.array([0] + dof_value).cumsum()
+        for i in range(len(dof_idx) - 1):
+            stats_dict[dof_key[i]] = {
+                "min": action_min[dof_idx[i] : dof_idx[i + 1]],
+                "delta": action_delta[dof_idx[i] : dof_idx[i + 1]],
+            }
+
+        agent_pos_idx = np.array([0] + agent_pos_value).cumsum()
+        for i in range(len(agent_pos_idx) - 1):
+            stats_dict[agent_pos_key[i]] = {
+                "min": state_min[agent_pos_idx[i] : agent_pos_idx[i + 1]],
+                "delta": state_delta[agent_pos_idx[i] : agent_pos_idx[i + 1]],
+            }
+
+        action_statistic_dof = {
+            "x2" : stats_dict
+        }
+        print(action_statistic_dof)
+        from wall_x.model.action_head import Normalizer
+        self.normalizer_action = Normalizer(action_statistic_dof, dof_config)
+        self.normalizer_propri= Normalizer(action_statistic_dof, agent_pos_config)
 
         print("Normalizer initialized")
 
@@ -237,7 +273,7 @@ def main_sync(args):
     """Synchronous version of main function."""
 
     # Create client and connect
-    client = WallXClient(args.config_path, uri=args.uri)
+    client = WallXClient(args.config_path, uri=args.uri, norm_stats_path=args.norm_stats_path)
     client.connect_sync()
 
     dataset, repo_id = init_serving_sample_dataset(client.train_config)
@@ -295,7 +331,7 @@ def main_sync(args):
 
 
 async def main(args):
-    client = WallXClient(args.config_path, uri=args.uri)
+    client = WallXClient(args.config_path, uri=args.uri, norm_stats_path=args.norm_stats_path)
     await client.connect()
     dataset, repo_id = init_serving_sample_dataset(client.train_config)
 
@@ -363,13 +399,18 @@ if __name__ == "__main__":
     parser.add_argument("--action_dim", type=int, default=7, help="Action dimension")
     parser.add_argument(
         "--config_path",
-        default="/x2robot_v2/vincent/workspace/opensource/cfg/config_from_qwen_libero.yml",
+        default="config_from_qwen_libero.yml",
         help="Train config path",
     )
     parser.add_argument(
         "--save_dir",
-        default="/x2robot_v2/vincent/workspace/opensource/plots/libero",
+        default="libero",
         help="Save directory",
+    )
+    parser.add_argument(
+        "--norm_stats_path",
+        default="x2_norm_stats.json",
+        help="Normalization stats path",
     )
     args = parser.parse_args()
 

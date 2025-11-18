@@ -30,7 +30,7 @@ class WallXPolicy(BasePolicy):
         min_pixels: int = 4 * 28 * 28,
         max_pixels: int = 16384 * 28 * 28,
         image_factor: int = 28,
-        max_length: int = 768,
+        max_length: int = 2048,
     ):
         """Initialize the Wall-X policy.
 

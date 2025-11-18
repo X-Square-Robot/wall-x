@@ -5,14 +5,15 @@ This module provides utilities for preprocessing text, images, and actions
 for multimodal transformer models in robotic learning tasks.
 """
 
-import re
-import torch
-import random
-from collections import OrderedDict
-from typing import List, Dict, Any, Optional, Union, Tuple
-from transformers import BatchFeature
-from dataclasses import dataclass
 import json
+import random
+import re
+from collections import OrderedDict
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import torch
+from transformers import BatchFeature
 
 KEY_MAPPINGS = {
     "lerobot/aloha_mobile_cabinet": {
@@ -28,6 +29,15 @@ KEY_MAPPINGS = {
         "camera": {
             "image": "face_view",
             "wrist_image": "left_wrist_view",
+        },
+        "state": "state",
+        "action": "actions",
+    },
+    "x2": {
+        "camera": {
+            "observation.images.faceImg": "face_view",
+            "observation.images.leftImg": "left_wrist_view",
+            "observation.images.rightImg": "right_wrist_view",
         },
         "state": "state",
         "action": "actions",

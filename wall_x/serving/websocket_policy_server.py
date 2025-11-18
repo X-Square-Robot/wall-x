@@ -3,7 +3,7 @@ import http
 import logging
 import time
 import traceback
-from typing import Dict, Any
+from typing import Any, Dict, Optional, Union
 
 try:
     import msgpack
@@ -54,7 +54,7 @@ class WebsocketPolicyServer:
         policy: BasePolicy,
         host: str = "0.0.0.0",
         port: int = 8000,
-        metadata: Dict | None = None,
+        metadata: Optional[Dict] = None,
     ) -> None:
         self._policy = policy
         self._host = host
@@ -126,7 +126,7 @@ class WebsocketPolicyServer:
 
 def _health_check(
     connection: _server.ServerConnection, request: _server.Request
-) -> _server.Response | None:
+) -> Optional[_server.Response]:
     if request.path == "/healthz":
         return connection.respond(http.HTTPStatus.OK, "OK\n")
     return None
