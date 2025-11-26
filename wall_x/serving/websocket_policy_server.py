@@ -3,7 +3,7 @@ import http
 import logging
 import time
 import traceback
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 
 try:
     import msgpack

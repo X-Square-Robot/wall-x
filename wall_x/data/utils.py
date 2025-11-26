@@ -11,6 +11,7 @@ import re
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
+import numpy as np
 
 import torch
 from transformers import BatchFeature
@@ -672,3 +673,127 @@ def load_norm_stats(norm_stats_path, dataset_name):
     )
 
     return {"action": action_norm_stats, "state": state_norm_stats}
+
+
+def compute_action_statistics(
+    norm_stats_path: str,
+    repo_id: str,
+    dof_config: Dict[str, int],
+    agent_pos_config: Dict[str, int],
+    robot_name: str = None,
+    customized_dof_config: Dict[str, int] = None,
+    customized_agent_pos_config: Dict[str, int] = None,
+) -> Dict[str, Dict[str, Dict[str, List[float]]]]:
+    """
+    Compute action statistics (min and delta values) for robot DOF and agent position configurations.
+
+    Args:
+        norm_stats_path (str): Path to the normalization statistics file
+        repo_id (str): Repository ID for the LeRobot configuration
+        dof_config (Dict[str, int]): Configuration mapping DOF names to their dimensions
+        agent_pos_config (Dict[str, int]): Configuration mapping agent position names to their dimensions
+        robot_name (str, optional): Name of the robot. If None, uses repo_id as the key
+        customized_dof_config (Dict[str, int], optional): Customized DOF configuration for specific robot
+        customized_agent_pos_config (Dict[str, int], optional): Customized agent position configuration for specific robot
+
+    Returns:
+        Dict[str, Dict[str, Dict[str, List[float]]]]: A dictionary containing min and delta values
+        for each DOF and agent position component, organized by robot name
+    """
+    # Import inside function to avoid circular imports
+    from .utils import load_norm_stats
+
+    # Load normalization statistics
+    norm_stats = load_norm_stats(norm_stats_path, repo_id)
+
+    # Extract min and delta values for action and state
+    action_min = norm_stats["action"].min.numpy().tolist()
+    action_delta = norm_stats["action"].delta.numpy().tolist()
+    state_min = norm_stats["state"].min.numpy().tolist()
+    state_delta = norm_stats["state"].delta.numpy().tolist()
+
+    # Use customized configurations if provided, otherwise use default ones
+    current_dof_config = (
+        customized_dof_config if customized_dof_config is not None else dof_config
+    )
+    current_agent_pos_config = (
+        customized_agent_pos_config
+        if customized_agent_pos_config is not None
+        else agent_pos_config
+    )
+
+    # Prepare keys and values for DOF and agent position configurations
+    dof_key = []
+    agent_pos_key = []
+    dof_value = []
+    agent_pos_value = []
+    stats_dict = {}
+
+    # Extract DOF configuration
+    for k, v in current_dof_config.items():
+        dof_key.append(k)
+        dof_value.append(v)
+
+    # Extract agent position configuration
+    for k, v in current_agent_pos_config.items():
+        agent_pos_key.append(k)
+        agent_pos_value.append(v)
+
+    # Calculate DOF indices and extract corresponding min/delta values
+    dof_idx = np.array([0] + dof_value).cumsum()
+    for i in range(len(dof_idx) - 1):
+        stats_dict[dof_key[i]] = {
+            "min": action_min[dof_idx[i] : dof_idx[i + 1]],
+            "delta": action_delta[dof_idx[i] : dof_idx[i + 1]],
+        }
+
+    # Calculate agent position indices and extract corresponding min/delta values
+    agent_pos_idx = np.array([0] + agent_pos_value).cumsum()
+    for i in range(len(agent_pos_idx) - 1):
+        stats_dict[agent_pos_key[i]] = {
+            "min": state_min[agent_pos_idx[i] : agent_pos_idx[i + 1]],
+            "delta": state_delta[agent_pos_idx[i] : agent_pos_idx[i + 1]],
+        }
+
+    # Use provided robot name or repo_id as the key
+    robot_key = robot_name if robot_name is not None else repo_id
+
+    return {robot_key: stats_dict}
+
+
+def update_action_statistics(
+    action_statistic_dof: Dict[str, Any],
+    norm_stats_path: str,
+    repo_id: str,
+    dof_config: Dict[str, int],
+    agent_pos_config: Dict[str, int],
+    robot_name: str,
+    customized_dof_config: Dict[str, int],
+    customized_agent_pos_config: Dict[str, int],
+) -> None:
+    """
+    Update the action statistics dictionary with new robot configuration.
+
+    Args:
+        action_statistic_dof (Dict[str, Any]): The dictionary to be updated with statistics
+        norm_stats_path (str): Path to the normalization statistics file
+        repo_id (str): Repository ID for the LeRobot configuration
+        dof_config (Dict[str, int]): Default DOF configuration
+        agent_pos_config (Dict[str, int]): Default agent position configuration
+        robot_name (str): Name of the robot to be added to the dictionary
+        customized_dof_config (Dict[str, int]): Customized DOF configuration for the specific robot
+        customized_agent_pos_config (Dict[str, int]): Customized agent position configuration for the specific robot
+    """
+    # Compute statistics for the new robot
+    robot_stats = compute_action_statistics(
+        norm_stats_path=norm_stats_path,
+        repo_id=repo_id,
+        dof_config=dof_config,
+        agent_pos_config=agent_pos_config,
+        robot_name=robot_name,
+        customized_dof_config=customized_dof_config,
+        customized_agent_pos_config=customized_agent_pos_config,
+    )
+
+    # Update the action_statistic_dof dictionary
+    action_statistic_dof.update(robot_stats)

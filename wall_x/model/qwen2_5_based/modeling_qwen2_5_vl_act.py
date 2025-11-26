@@ -45,7 +45,6 @@ from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl import (
 )
 from wall_x.data.config import ACTION_DATASET_NAMES, MULTIMODAL_DATASET_NAMES
 from wall_x.utils.constant import action_statistic_dof
-from wall_x.data.utils import load_norm_stats
 from pprint import pprint
 
 logger = logging.get_logger(__name__)
@@ -771,43 +770,24 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             "customized_agent_pos_config"
         ]
         norm_stats_path = config["norm_stats_path"]
-        norm_stats = load_norm_stats(
-            norm_stats_path, config["data"]["lerobot_config"]["repo_id"]
-        )
-        action_min = norm_stats["action"].min.numpy().tolist()
-        action_delta = norm_stats["action"].delta.numpy().tolist()
-        state_min = norm_stats["state"].min.numpy().tolist()
-        state_delta = norm_stats["state"].delta.numpy().tolist()
+
+        # Use the compute_action_statistics function from utils
 
         name = config["customized_robot_config"]["name"]
 
-        dof_key = []
-        agent_pos_key = []
-        dof_value = []
-        agent_pos_value = []
-        stats_dict = {}
-        for k, v in customized_dof_config.items():
-            dof_key.append(k)
-            dof_value.append(v)
-        for k, v in customized_agent_pos_config.items():
-            agent_pos_key.append(k)
-            agent_pos_value.append(v)
+        # Update the global action_statistic_dof dictionary
+        from wall_x.data.utils import update_action_statistics
 
-        dof_idx = np.array([0] + dof_value).cumsum()
-        for i in range(len(dof_idx) - 1):
-            stats_dict[dof_key[i]] = {
-                "min": action_min[dof_idx[i] : dof_idx[i + 1]],
-                "delta": action_delta[dof_idx[i] : dof_idx[i + 1]],
-            }
-
-        agent_pos_idx = np.array([0] + agent_pos_value).cumsum()
-        for i in range(len(agent_pos_idx) - 1):
-            stats_dict[agent_pos_key[i]] = {
-                "min": state_min[agent_pos_idx[i] : agent_pos_idx[i + 1]],
-                "delta": state_delta[agent_pos_idx[i] : agent_pos_idx[i + 1]],
-            }
-
-        action_statistic_dof[name] = stats_dict
+        update_action_statistics(
+            action_statistic_dof=action_statistic_dof,  # Assuming this is a global variable
+            norm_stats_path=norm_stats_path,
+            repo_id=config["data"]["lerobot_config"]["repo_id"],
+            dof_config={},  # Empty default config since we're using customized configs
+            agent_pos_config={},  # Empty default config since we're using customized configs
+            robot_name=name,
+            customized_dof_config=customized_dof_config,
+            customized_agent_pos_config=customized_agent_pos_config,
+        )
 
         print("Customized robot config added")
         pprint(action_statistic_dof)
