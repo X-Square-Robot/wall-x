@@ -675,7 +675,8 @@ def load_norm_stats(norm_stats_path, dataset_name):
     return {"action": action_norm_stats, "state": state_norm_stats}
 
 
-def compute_action_statistics(
+def update_action_statistics(
+    action_statistic_dof: Dict[str, Any],
     norm_stats_path: str,
     repo_id: str,
     dof_config: Dict[str, int],
@@ -683,11 +684,12 @@ def compute_action_statistics(
     robot_name: str = None,
     customized_dof_config: Dict[str, int] = None,
     customized_agent_pos_config: Dict[str, int] = None,
-) -> Dict[str, Dict[str, Dict[str, List[float]]]]:
+) -> None:
     """
-    Compute action statistics (min and delta values) for robot DOF and agent position configurations.
+    Update the action statistics dictionary with new robot configuration.
 
     Args:
+        action_statistic_dof (Dict[str, Any]): The dictionary to be updated with statistics
         norm_stats_path (str): Path to the normalization statistics file
         repo_id (str): Repository ID for the LeRobot configuration
         dof_config (Dict[str, int]): Configuration mapping DOF names to their dimensions
@@ -695,14 +697,7 @@ def compute_action_statistics(
         robot_name (str, optional): Name of the robot. If None, uses repo_id as the key
         customized_dof_config (Dict[str, int], optional): Customized DOF configuration for specific robot
         customized_agent_pos_config (Dict[str, int], optional): Customized agent position configuration for specific robot
-
-    Returns:
-        Dict[str, Dict[str, Dict[str, List[float]]]]: A dictionary containing min and delta values
-        for each DOF and agent position component, organized by robot name
     """
-    # Import inside function to avoid circular imports
-    from .utils import load_norm_stats
-
     # Load normalization statistics
     norm_stats = load_norm_stats(norm_stats_path, repo_id)
 
@@ -758,42 +753,5 @@ def compute_action_statistics(
     # Use provided robot name or repo_id as the key
     robot_key = robot_name if robot_name is not None else repo_id
 
-    return {robot_key: stats_dict}
-
-
-def update_action_statistics(
-    action_statistic_dof: Dict[str, Any],
-    norm_stats_path: str,
-    repo_id: str,
-    dof_config: Dict[str, int],
-    agent_pos_config: Dict[str, int],
-    robot_name: str,
-    customized_dof_config: Dict[str, int],
-    customized_agent_pos_config: Dict[str, int],
-) -> None:
-    """
-    Update the action statistics dictionary with new robot configuration.
-
-    Args:
-        action_statistic_dof (Dict[str, Any]): The dictionary to be updated with statistics
-        norm_stats_path (str): Path to the normalization statistics file
-        repo_id (str): Repository ID for the LeRobot configuration
-        dof_config (Dict[str, int]): Default DOF configuration
-        agent_pos_config (Dict[str, int]): Default agent position configuration
-        robot_name (str): Name of the robot to be added to the dictionary
-        customized_dof_config (Dict[str, int]): Customized DOF configuration for the specific robot
-        customized_agent_pos_config (Dict[str, int]): Customized agent position configuration for the specific robot
-    """
-    # Compute statistics for the new robot
-    robot_stats = compute_action_statistics(
-        norm_stats_path=norm_stats_path,
-        repo_id=repo_id,
-        dof_config=dof_config,
-        agent_pos_config=agent_pos_config,
-        robot_name=robot_name,
-        customized_dof_config=customized_dof_config,
-        customized_agent_pos_config=customized_agent_pos_config,
-    )
-
     # Update the action_statistic_dof dictionary
-    action_statistic_dof.update(robot_stats)
+    action_statistic_dof.update({robot_key: stats_dict})

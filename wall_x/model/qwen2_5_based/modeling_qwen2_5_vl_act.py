@@ -44,6 +44,7 @@ from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl import (
     Qwen2_5_VLSdpaAttention,
 )
 from wall_x.data.config import ACTION_DATASET_NAMES, MULTIMODAL_DATASET_NAMES
+from wall_x.data.utils import update_action_statistics
 from wall_x.utils.constant import action_statistic_dof
 from pprint import pprint
 
@@ -775,15 +776,10 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
 
         name = config["customized_robot_config"]["name"]
 
-        # Update the global action_statistic_dof dictionary
-        from wall_x.data.utils import update_action_statistics
-
         update_action_statistics(
             action_statistic_dof=action_statistic_dof,  # Assuming this is a global variable
             norm_stats_path=norm_stats_path,
             repo_id=config["data"]["lerobot_config"]["repo_id"],
-            dof_config={},  # Empty default config since we're using customized configs
-            agent_pos_config={},  # Empty default config since we're using customized configs
             robot_name=name,
             customized_dof_config=customized_dof_config,
             customized_agent_pos_config=customized_agent_pos_config,

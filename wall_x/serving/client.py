@@ -16,7 +16,8 @@ import torch
 import matplotlib.pyplot as plt
 import os
 
-from wall_x.data.utils import compute_action_statistics
+from wall_x.data.utils import update_action_statistics
+from wall_x.utils.constant import action_statistic_dof
 from wall_x.model.action_head import Normalizer
 
 try:
@@ -175,14 +176,13 @@ class WallXClient:
 
         agent_pos_config = {"biarm_eed_with_base": 20}
 
-        action_statistic_dof = compute_action_statistics(
+        update_action_statistics(
+            action_statistic_dof=action_statistic_dof,
             norm_stats_path=self.norm_stats_path,
             repo_id="x2",
             dof_config=dof_config,
             agent_pos_config=agent_pos_config,
         )
-
-        print(action_statistic_dof)
 
         self.normalizer_action = Normalizer(action_statistic_dof, dof_config)
         self.normalizer_propri = Normalizer(action_statistic_dof, agent_pos_config)
