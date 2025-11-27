@@ -220,6 +220,7 @@ def prepare_batch_sync(data, normalizer_action, normalizer_propri, dataset_names
 
 def init_serving_sample_dataset(train_config):
     from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+
     repo_id = train_config["data"]["lerobot_config"]["repo_id"]
 
     meta_info = LeRobotDatasetMetadata(repo_id)
