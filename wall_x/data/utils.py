@@ -34,15 +34,16 @@ KEY_MAPPINGS = {
         "state": "state",
         "action": "actions",
     },
-    "x2": {
-        "camera": {
+    "x2":{
+        "camera":{
             "observation.images.faceImg": "face_view",
             "observation.images.leftImg": "left_wrist_view",
             "observation.images.rightImg": "right_wrist_view",
         },
-        "state": "state",
-        "action": "actions",
+        "state": "observation.state",
+        "action": "action",
     },
+
 }
 
 CAMERA_NAME_MAPPING = {

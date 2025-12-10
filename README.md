@@ -61,7 +61,7 @@ pip install -e .
 Install wall_x:
 ```bash
 git submodule update --init --recursive
-MAX_JOBS=4 pip install --no-build-isolation --verbose .
+MAX_JOBS=4 pip install --no-build-isolation --verbose -e .
 ```
 
 ## Training
