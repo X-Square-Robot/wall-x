@@ -145,6 +145,7 @@ class QwenVlAct_Trainer:
         self.dataload_config = get_data_configs(self.config["data"])
         self.data_config_path = data_config_path
         self.use_fast_tokenizer = self.config.get("use_fast_tokenizer", False)
+        self.use_selective_recompute = self.config.get("use_selective_recompute", False)
 
         # Load model and initialize training components
         self.load_model()
@@ -580,6 +581,7 @@ class QwenVlAct_Trainer:
                 self.use_fast_tokenizer,
                 self.processor,
                 flow_loss_weight=flow_loss_weight,
+                use_selective_recompute = self.use_selective_recompute
             )
 
             model = model.to(torch.bfloat16)
@@ -754,8 +756,8 @@ class QwenVlAct_Trainer:
                 renamed_weights[key] = value
 
         # Load weights into model
-        err = model.load_state_dict(renamed_weights, strict=False)
-        self.print_rank0(f"Weight loading report: {err}", flush=True)
+        # err = model.load_state_dict(renamed_weights, strict=False)
+        # self.print_rank0(f"Weight loading report: {err}", flush=True)
         if self.accelerator.is_main_process:
             self.print_rank0(f"Loaded pretrained weights from: {pretrain_weight_path}")
 
