@@ -1,5 +1,6 @@
 import os
 import torch
+import yaml
 import numpy as np
 import glob
 import torch.nn as nn
@@ -825,7 +826,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration, ActionGeneratio
     def from_pretrained(
         cls,
         pretrained_model_path,
-        train_config,
+        train_config=None,
         config_path=None,
         processor_path=None,
         action_tokenizer_path=None,
@@ -855,15 +856,16 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration, ActionGeneratio
 
         # Set the customized robot configuration to ensure consistency between cross-embodiment
         # representations and the Wall-X action dimensionality.
-        cls._set_customized_config(train_config)
-        customized_dof_config = train_config["customized_robot_config"][
-            "customized_dof_config"
-        ]
-        customized_agent_pos_config = train_config["customized_robot_config"][
-            "customized_agent_pos_config"
-        ]
-        setattr(config, "customized_dof_config", customized_dof_config)
-        setattr(config, "customized_agent_pos_config", customized_agent_pos_config)
+        # if not train_config:
+        #     cls._set_customized_config(train_config)
+        #     customized_dof_config = train_config["customized_robot_config"][
+        #         "customized_dof_config"
+        #     ]
+        #     customized_agent_pos_config = train_config["customized_robot_config"][
+        #         "customized_agent_pos_config"
+        #     ]
+        #     setattr(config, "customized_dof_config", customized_dof_config)
+        #     setattr(config, "customized_agent_pos_config", customized_agent_pos_config)
 
         # Initialize model with configuration and processor
         model = cls(config, processor=processor, **kwargs)
