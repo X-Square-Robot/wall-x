@@ -261,6 +261,7 @@ class DataCollator:
 
         self.use_fast_tokenizer = self.config.get("use_fast_tokenizer", False)
         self.dataset_name = self.config["data"]["lerobot_config"].get("repo_id", "")
+        self.dataset_name = [self.dataset_name] * self.config["batch_size_per_gpu"]
         self.load_processor()
 
     def load_processor(self):
@@ -336,7 +337,7 @@ class DataCollator:
                 #     agent_pos, self.state_min_stat, self.state_delta
                 # )
                 agent_pos = self.normalizer_propri.normalize_data(
-                    agent_pos, [self.dataset_name]
+                    agent_pos, self.dataset_name
                 )
                 # print("agent_pos",agent_pos.shape)
                 # if agent_pos.shape[-1] != 20:
@@ -373,7 +374,7 @@ class DataCollator:
                 # action = self._normalize(
                 #     action, self.action_min_stat, self.action_delta
                 # )
-                action = self.normalizer_action.normalize_data(action, [self.dataset_name])
+                action = self.normalizer_action.normalize_data(action, self.dataset_name)
 
                 # if action.shape[-1] != 20:
                 #     action = torch.cat(
