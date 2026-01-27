@@ -37,6 +37,7 @@ from transformers.modeling_outputs import (
 from wall_x.fusions import ops
 from wall_x.model.action_head import ActionProcessor
 from wall_x.model.qwen2_5_based.configuration_qwen2_5_vl import Qwen2_5_VLConfig
+from wall_x.model.model_utils import load_wallx_processors, update_model_config
 from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl import (
     Qwen2_5_VisionTransformerPretrainedModel,
     Qwen2_5_VLAttention,
@@ -846,9 +847,21 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration, ActionGeneratio
             Qwen2_5_VLMoEForAction: Loaded model instance
         """
         # Load model components from pretrained path
-        config_path = os.path.join(pretrained_model_path, "config.json")
-        config = cls.config_class.from_pretrained(config_path)
-        processor = AutoProcessor.from_pretrained(pretrained_model_path, use_fast=True)
+
+        with open(os.path.join(pretrained_model_path, "config.yml"), "r") as f:
+            train_config = yaml.load(f, Loader=yaml.FullLoader)
+
+        model_config_path = os.path.join(pretrained_model_path, "config.json")
+        model_config = cls.config_class.from_pretrained(model_config_path)
+        
+
+        model_config = update_model_config(train_config, model_config)
+        model_config._attn_implementation = "sdpa"
+   
+        processors_dict = load_wallx_processors(train_config)
+        processor = processors_dict["processor"]
+
+
         if action_tokenizer_path is not None:
             processor.action_processor = AutoProcessor.from_pretrained(
                 action_tokenizer_path, trust_remote_code=True
@@ -868,7 +881,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration, ActionGeneratio
         #     setattr(config, "customized_agent_pos_config", customized_agent_pos_config)
 
         # Initialize model with configuration and processor
-        model = cls(config, processor=processor, **kwargs)
+        model = cls(model_config, processor=processor, **kwargs)
 
         # Resize token embeddings to match processor tokenizer vocabulary size
         model.resize_token_embeddings(len(processor.tokenizer))
