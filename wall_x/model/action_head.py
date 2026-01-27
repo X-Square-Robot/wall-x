@@ -105,6 +105,8 @@ class Normalizer(nn.Module):
         new_xs = []
         dataset_names = [name for name in dataset_names if name != "x2_multimodal"]
         for x, dataset_name in zip(xs, dataset_names):
+            # print(x.shape,self.min[dataset_name].shape)
+            dataset_name = dataset_name.replace("_all", "")
             x = (x - self.min[dataset_name]) / (self.delta[dataset_name])
             x = x * 2 - 1
             x = torch.clamp(x, -1, 1)
@@ -117,6 +119,7 @@ class Normalizer(nn.Module):
         dataset_names = [name for name in dataset_names if name != "x2_multimodal"]
         dof_mask = dof_mask if dof_mask is not None else [None] * len(xs)
         for x, dataset_name, mask in zip(xs, dataset_names, dof_mask):
+            dataset_name = dataset_name.replace("_all", "")
             x = (x + 1) / 2
             if mask is not None:
                 mask = mask[0].bool()
@@ -534,7 +537,7 @@ class ActionProcessor(nn.Module):
         self.agent_pos_config = config.agent_pos_config
         self.action_dim = sum([v for k, v in self.dof_config.items()])
         self.propri_dim = sum([v for k, v in self.agent_pos_config.items()])
-
+        
         print_rank_last(
             f"self.dof_config: {self.dof_config}; action_dim: {self.action_dim}; self.agent_pos_config: {self.agent_pos_config}; propri_dim: {self.propri_dim}"
         )
@@ -735,8 +738,8 @@ class ActionProcessor(nn.Module):
         # timestep: bs
         with torch.autocast("cuda", dtype=torch.float32):
             if dof_mask is not None and self.config.proj_with_mask:
-                # if dof_mask.shape[1] == 1:
-                #     dof_mask = dof_mask.unsqueeze(1).repeat(1,noisy_action.shape[1],1)
+                if dof_mask.shape[1] == 1:
+                    dof_mask = dof_mask.unsqueeze(1).repeat(1,noisy_action.shape[1],1)
                 noisy_action = torch.cat([noisy_action, dof_mask], dim=-1)
 
             noisy_action = noisy_action.to(dtype=self.w1.weight.dtype)

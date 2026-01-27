@@ -248,13 +248,6 @@ class DataCollator:
         self.config = config
         self.dataload_config = dataload_config
 
-        print("2:normalizer_action.min",normalizer_propri)
-        
-        # self.action_min_stat = normalizer_action[0].min["libero"]
-        # self.action_delta = normalizer_action[1].delta["libero"]
-        # self.state_min_stat = normalizer_propri.min["libero"]
-        # self.state_delta = normalizer_propri.delta["libero"]
-
         self.normalizer_action = normalizer_action[0]
         self.normalizer_propri = normalizer_propri
         self.lerobot_config = lerobot_config
@@ -332,14 +325,7 @@ class DataCollator:
                 agent_pos_mask = (~torch.isnan(agent_pos)).float()
                 # print("agent_pos_mask",agent_pos_mask.shape)
                 agent_pos.nan_to_num_(nan=0.0)
-                # print("agent_pos",agent_pos.shape)
-                # agent_pos = self._normalize(
-                #     agent_pos, self.state_min_stat, self.state_delta
-                # )
-                agent_pos = self.normalizer_propri.normalize_data(
-                    agent_pos, self.dataset_name
-                )
-                # print("agent_pos",agent_pos.shape)
+
                 # if agent_pos.shape[-1] != 20:
                 #     agent_pos = torch.cat(
                 #         [
@@ -363,6 +349,9 @@ class DataCollator:
                 #         ],
                 #         dim=-1,
                 #     )
+                agent_pos = self.normalizer_propri.normalize_data(
+                    agent_pos, self.dataset_name
+                )
                 additional_inputs["proprioception"] = agent_pos
                 additional_inputs["agent_pos_mask"] = agent_pos_mask
             elif key == "action":
@@ -371,10 +360,6 @@ class DataCollator:
                     action = action.unsqueeze(1)
                 dof_mask = (~torch.isnan(action)).float()
                 action.nan_to_num_(nan=0.0)
-                # action = self._normalize(
-                #     action, self.action_min_stat, self.action_delta
-                # )
-                action = self.normalizer_action.normalize_data(action, self.dataset_name)
 
                 # if action.shape[-1] != 20:
                 #     action = torch.cat(
@@ -397,6 +382,7 @@ class DataCollator:
                 #         ],
                 #         dim=-1,
                 #     )
+                action = self.normalizer_action.normalize_data(action, self.dataset_name)
                 additional_inputs["action_chunk"] = action
                 additional_inputs["dof_mask"] = dof_mask
             elif key == "image_inputs":
@@ -606,13 +592,14 @@ def get_data_configs(config):
 
 class TestDataset(PreprocessedDataset):
     def __init__(
-        self, dataset, config, dataload_config, norm_stats, lerobot_config, seed=42
+        self, dataset, config, dataload_config, normalizer_action, normalizer_propri, lerobot_config, seed=42
     ):
         super().__init__(
             dataset,
             config,
             dataload_config,
-            norm_stats,
+            normalizer_action,
+            normalizer_propri,
             lerobot_config,
             seed=seed,
             rank=0,
@@ -639,6 +626,8 @@ class TestDataset(PreprocessedDataset):
 def load_test_dataset(
     config,
     lerobot_config,
+    normalizer_action,
+    normalizer_propri,
     seed=42,
     episode=0,
 ):
@@ -667,7 +656,7 @@ def load_test_dataset(
     assert (
         norm_stats_path is not None
     ), "norm stats is required, please refer to 'wall-x/scripts/compute_norm_stats.py' to compute stats"
-    norm_stats = load_norm_stats(norm_stats_path, repo_id)
+    # norm_stats = load_norm_stats(norm_stats_path, repo_id)
 
     delta_timestamps = {
         # action chunk
@@ -690,7 +679,7 @@ def load_test_dataset(
     print(f"Number of frames selected: {dataset.num_frames}")
 
     dataset = TestDataset(
-        dataset, config, dataload_config, norm_stats, lerobot_config, seed=seed
+        dataset, config, dataload_config, normalizer_action, normalizer_propri, lerobot_config, seed=seed
     )
 
     return dataset

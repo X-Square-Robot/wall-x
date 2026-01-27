@@ -34,7 +34,7 @@ KEY_MAPPINGS = {
         "state": "state",
         "action": "actions",
     },
-    "x2": {
+    "x2_normal": {
         "camera": {
             "observation.images.faceImg": "face_view",
             "observation.images.leftImg": "left_wrist_view",

@@ -1130,16 +1130,39 @@ class Qwen2_5_VLSdpaAttention(Qwen2_5_VLAttention):
                 "cos": cos,
                 "cache_position": cache_position,
             }  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(
-                key_states, value_states, self.layer_idx, cache_kwargs
-            )
+            if use_cache:
+                key_states, value_states = past_key_value.update(
+                    key_states, value_states, self.layer_idx, cache_kwargs
+                )
+            else:
+                past_key_states, past_value_states = past_key_value[self.layer_idx]
+                key_states = torch.cat([past_key_states, key_states], dim=-2)
+                value_states = torch.cat([past_value_states, value_states], dim=-2)
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         causal_mask = attention_mask
         if attention_mask is not None:  # no matter the length, we just slice it
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+            # 确保attention_mask在head维度上正确匹配
+            if len(attention_mask.shape) == 2:  # [batch_size, seq_len]
+                # 扩展为 [batch_size, 1, seq_len, seq_len] 的因果掩码格式
+                bsz, seq_len = attention_mask.shape
+                causal_mask = attention_mask.view(bsz, 1, 1, seq_len).expand(
+                    bsz, 1, seq_len, seq_len
+                )
+            elif len(attention_mask.shape) == 3:  # [batch_size, seq_len, seq_len]
+                # 添加head维度：[batch_size, 1, seq_len, seq_len]
+                causal_mask = attention_mask.unsqueeze(1)
+            elif (
+                len(attention_mask.shape) == 4
+            ):  # [batch_size, num_heads, seq_len, seq_len]
+                causal_mask = attention_mask
+            else:
+                raise ValueError(f"不支持的attention_mask维度: {attention_mask.shape}")
+
+            # 将attention mask转化成布尔类型
+            causal_mask = causal_mask.to(torch.bool)
 
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
@@ -1152,6 +1175,18 @@ class Qwen2_5_VLSdpaAttention(Qwen2_5_VLAttention):
         # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
         # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
         is_causal = True if causal_mask is None and q_len > 1 else False
+
+        if q_len == 1:
+            is_causal = False
+            causal_mask = torch.ones(
+                bsz,
+                1,
+                1,
+                key_states.shape[2],
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            ).contiguous()
+            causal_mask = causal_mask.to(torch.bool)
 
         attn_output = torch.nn.functional.scaled_dot_product_attention(
             query_states,
