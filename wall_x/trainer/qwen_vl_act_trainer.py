@@ -21,6 +21,7 @@ from transformers import AutoProcessor
 from wall_x.model.action_head import Normalizer
 from wall_x.utils.timers import Timers
 from wall_x.model.qwen2_5_based import Qwen2_5_VLMoEForAction, Qwen2_5_VLConfig
+from wall_x.utils.constant import action_statistic_dof as default_action_statistic_dof
 from wall_x.data.config import ACTION_DATASET_NAMES, MULTIMODAL_DATASET_NAMES
 from wall_x.data.load_lerobot_dataset import (
     PreprocessedDataset,
@@ -1017,6 +1018,22 @@ class QwenVlAct_Trainer:
                 new_state_dict = {}
                 for name, param in filtered_state_dict.items():
                     if name in self.model.state_dict():
+                        if param.size() == self.model.state_dict()[name].size():
+                            new_state_dict[name] = param
+                        else:
+                            size_0 = param.size()
+                            size_1 = self.model.state_dict()[name].size()
+                            new_state_dict[name] = self.model.state_dict()[name]
+                            slices = [
+                                slice(0, min(old_dim, new_dim))
+                                for old_dim, new_dim in zip(size_0, size_1)
+                            ]
+                            new_state_dict[name][slices] = param[slices]
+                            self.print_rank0(
+                                f"Not match key: {name}, required shape: {size_1}, loaded shape: {size_0}, new shape: {new_state_dict[name].size()}"
+                            )
+                    elif "module."+name in self.model.state_dict():
+                        name = "module."+name
                         if param.size() == self.model.state_dict()[name].size():
                             new_state_dict[name] = param
                         else:

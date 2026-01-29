@@ -2130,6 +2130,13 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration, ActionGeneratio
             inputs_embeds.dtype
         )
         flow_action_mask = input_ids == self.action_token_id_set["action_token_id"]
+        # print("flow_action_mask",self.action_token_id_set["action_token_id"])
+        # print("flow_action_mask.shape",flow_action_mask.shape)
+        # print("inputs_embeds.shape",inputs_embeds.shape)
+        # print("action_embed.shape",action_embed.shape)
+        # print("flow_action_mask",flow_action_mask)
+        # print("input_ids",input_ids)
+
         inputs_embeds[flow_action_mask] = action_embed
 
         timing_results["action_initialization"] = time.time() - action_init_start_time

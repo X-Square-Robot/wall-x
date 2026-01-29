@@ -1,6 +1,102 @@
 import torch
+import os
 import numpy as np
+from transformers import AutoProcessor
+from wall_x.model.action_head import Normalizer
+from wall_x.data.load_lerobot_dataset import load_test_dataset, get_data_configs
+from wall_x.utils.constant import action_statistic_dof as default_action_statistic_dof
+import json
+def update_model_config(train_config, model_config):
+    model_config.use_state_string_representation = train_config["data"].get(
+        "use_state_string_representation", False
+    )
+    model_config.flow_loss_weight = train_config.get("flow_loss_weight", 1.0)
 
+    model_config.dof_config = train_config["dof_config"]
+    model_config.agent_pos_config = train_config["agent_pos_config"]
+
+    model_config.action_horizon_flow = train_config["data"].get(
+        "action_horizon_flow", 32
+    )
+
+    if train_config.get("_attn_implementation", None) is not None:
+        model_config._attn_implementation = train_config["_attn_implementation"]
+
+    return model_config
+
+def load_wallx_processors(config):
+    processor = AutoProcessor.from_pretrained(config["processor_path"], use_fast=True)
+    # pad side = left
+    processor.tokenizer.padding_side = "left"
+
+    new_tokens = ["<|propri|>", "<|action|>"]
+    # special_tokens = []
+    action_tokenizer_type = config.get("action_tokenizer_type", None)
+    if action_tokenizer_type == "fast":
+        train_action_tokenizer = AutoProcessor.from_pretrained(
+            config["action_tokenizer_path"], trust_remote_code=True
+        )
+        val_action_tokenizer = AutoProcessor.from_pretrained(
+            config["action_tokenizer_path"], trust_remote_code=True
+        )
+        new_tokens += [
+            f"<|action_token_{i}|>" for i in range(train_action_tokenizer.vocab_size)
+        ]
+    elif action_tokenizer_type == "spatialvla":
+        raise NotImplementedError("SpatialActionTokenizer is not implemented")
+    else:
+        train_action_tokenizer = None
+        val_action_tokenizer = None
+
+    num_added_tokens = processor.tokenizer.add_tokens(new_tokens)
+
+    if action_tokenizer_type and train_action_tokenizer.vocab_size > 0:
+        action_mapper = {}
+        for i in range(train_action_tokenizer.vocab_size):
+            token = f"<|action_token_{i}|>"
+            token_id = processor.tokenizer.convert_tokens_to_ids(token)
+            action_mapper[token_id] = i
+    else:
+        action_mapper = None
+
+    return {
+        "processor": processor,
+        "train_action_tokenizer": train_action_tokenizer,
+        "val_action_tokenizer": val_action_tokenizer,
+        "action_mapper": action_mapper,
+        "num_added_tokens": num_added_tokens,
+    }
+
+
+def register_normalizers(config, model_path):
+    if config.get("customized_action_statistic_dof", None):
+        action_statistic_dof = json.load(open(config["customized_action_statistic_dof"], "r"))
+    else:
+        action_statistic_dof = default_action_statistic_dof
+
+    if os.path.exists(model_path+"/normalizer_action.pth"):
+        print("Loading normalizer_action from checkpoint", model_path+"/normalizer_action.pth", flush=True)
+        normalizer_action = Normalizer.from_ckpt(model_path+"/normalizer_action.pth")
+    else:
+        normalizer_action = Normalizer(
+            action_statistic_dof, config["dof_config"],
+            min_key=config.get("min_key", "min"), 
+            delta_key=config.get("delta_key", "delta")
+        )
+
+    # print("action_statistic_dof",action_statistic_dof)
+
+    if os.path.exists(model_path+"/normalizer_propri.pth"):
+        print("Loading normalizer_propri from checkpoint", model_path+"/normalizer_propri.pth", flush=True)
+        normalizer_propri = Normalizer.from_ckpt(model_path+"/normalizer_propri.pth")
+    else:
+        normalizer_propri = Normalizer(
+            action_statistic_dof, config["agent_pos_config"],
+            min_key=config.get("min_key", "min"),
+            delta_key=config.get("delta_key", "delta")
+        )
+
+    return normalizer_action, normalizer_propri
 
 def find_first_last_ones(tensor):
     """

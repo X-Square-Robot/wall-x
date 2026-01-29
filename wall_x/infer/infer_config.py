@@ -388,12 +388,12 @@ class InferConfig:
         robot_action_interpolate_multiplier: int = 70,  # 动作插值
         robot_use_joint_angle_control: bool = False,  # 使用关节控制（注意这时候模型需要是关节预测模型）
         turtle_as_desktop: bool = False,  # 使用乌龟本体做桌面操作，固定底盘头移动，头部相机，和底盘高度
-        action_horizon: int = 32,  # 请正确填写模型的horizon
+        action_horizon: int = 10,  # 请正确填写模型的horizon
         action_dim: int | None = None,
         model_device: str = "cuda:0",
         num_inference_timesteps: int = 10,
         norm_key: str = "x2_normal",
-        cam_names: list[str] = ["face_view", "left_wrist_view", "right_wrist_view"],
+        cam_names: list[str] = ["face_view", "right_wrist_view"],
     ):
         # 私有属性用于存储路径
         assert checkpoint_path is not None
@@ -406,6 +406,10 @@ class InferConfig:
             self.normalizer_propri_path = os.path.join(
                 checkpoint_path, "normalizer_propri.pth"
             )
+        
+        self.model_path=checkpoint_path
+        self.action_tokenizer_path="/x2robot_v2/Models/fast/"
+
 
         # 其他配置属性
         self.robot_host = robot_host
@@ -424,6 +428,11 @@ class InferConfig:
             action_horizon  # 默认由train config 的flow action horizon控制
         )
         self._action_dim = action_dim  # 默认由train config 的dof config决定
+        
+        self.action_dim = action_dim
+        self.pred_horizon = action_horizon
+        self.predict_mode = "diffusion"
+        self.camera_key = cam_names
 
         self.model_device = model_device
         self.num_inference_timesteps = (

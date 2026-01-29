@@ -105,8 +105,6 @@ class Normalizer(nn.Module):
         new_xs = []
         dataset_names = [name for name in dataset_names if name != "x2_multimodal"]
         for x, dataset_name in zip(xs, dataset_names):
-            # print(x.shape,self.min[dataset_name].shape)
-            dataset_name = dataset_name.replace("_all", "")
             x = (x - self.min[dataset_name]) / (self.delta[dataset_name])
             x = x * 2 - 1
             x = torch.clamp(x, -1, 1)
@@ -119,7 +117,6 @@ class Normalizer(nn.Module):
         dataset_names = [name for name in dataset_names if name != "x2_multimodal"]
         dof_mask = dof_mask if dof_mask is not None else [None] * len(xs)
         for x, dataset_name, mask in zip(xs, dataset_names, dof_mask):
-            dataset_name = dataset_name.replace("_all", "")
             x = (x + 1) / 2
             if mask is not None:
                 mask = mask[0].bool()
@@ -606,6 +603,12 @@ class ActionProcessor(nn.Module):
     def set_normalizer(self, normalizer_action, normalizer_propri):
         self.normalizer_action = normalizer_action
         self.normalizer_propri = normalizer_propri
+
+        # dataset_name = self.config["data"]["lerobot_config"]["repo_id"]
+        # print("normalizer_propri min", self.normalizer_propri.min.__getattr__(dataset_name), flush=True)
+        # print("normalizer_propri delta", self.normalizer_propri.delta.__getattr__(dataset_name), flush=True)
+        # print("normalizer_action min", self.normalizer_action.min.__getattr__(dataset_name), flush=True)
+        # print("normalizer_action delta", self.normalizer_action.delta.__getattr__(dataset_name), flush=True)
 
     def sample_time(self, batch_size, device, dtype):
         """

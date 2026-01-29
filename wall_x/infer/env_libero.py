@@ -4,9 +4,8 @@ import numpy as np
 from typing import Dict, Any, Tuple, List
 from libero.libero import benchmark
 from wall_x.infer.env import BaseEnv, InferConfig
-from wall_x.infer.model_wrapper import WallxModelWrapper
+from wall_x.serving.policy.wall_x_policy import WallXPolicy
 
-# from run_scripts.infer_all import WallxInfer, move_to_cuda, WallxModelWrapper
 from wall_x.infer.base_dataclass import RobotStateActionData
 from wall_x.infer.utils_libero import (
     get_libero_env,
@@ -113,8 +112,16 @@ class LiberoRobotEnv(BaseEnv):
                 self.logger.error(f"加载初始状态文件失败: {e}")
                 raise
 
-    def _register_model(self) -> WallxModelWrapper:
-        return WallxModelWrapper(self.config)
+    def _register_model(self) -> WallXPolicy:
+
+        return WallXPolicy(model_path = self.config.model_path,
+                            train_config = self.config.train_config,
+                            action_tokenizer_path = self.config.action_tokenizer_path,
+                            action_dim = self.config.action_dim,
+                            agent_pos_dim= self.config.action_dim,
+                            pred_horizon= self.config.pred_horizon,
+                            camera_key= self.config.cam_names,
+                            predict_mode=self.config.predict_mode)
 
     def get_instruction(self, task_desc: str) -> str:
         return task_desc
@@ -435,10 +442,22 @@ class LiberoRobotEnv(BaseEnv):
             try:
                 model_input = self.get_observation(current_obs)
                 instruction = self.get_instruction(task_desc)
+                model_input["prompt"] = instruction
+                model_input["dataset_names"] = "libero_all"
 
-                model_output = self.model.infer_flow_action(model_input, instruction)
+                state = np.concatenate([
+                    model_input['robot_state_action_data'].data["state_right_ee_cartesian_pos"],
+                    model_input['robot_state_action_data'].data["state_right_ee_rotation"],
+                    model_input['robot_state_action_data'].data["state_right_gripper"]
+                ],axis=-1)
 
-                print("model_output", model_output["predict_action"], flush=True)
+                model_input["state"] = state
+                model_output = self.model.infer(model_input)
+
+                model_output["robot_state_action_data"] = model_input["robot_state_action_data"]
+                model_output["robot_state_action_data"].save_action_data(
+                    model_output["predict_action"]
+                )
 
                 model_output["_last_obs"] = None
 
