@@ -82,17 +82,20 @@ if __name__ == "__main__":
     )
     if args.mode == "flow":
         config.action_horizon = config.train_config.get("data", {}).get(
-            "action_horizon_flow", 32
+            "action_horizon_flow", 10
         )
     elif args.mode == "ar":
         config.action_horizon = config.train_config.get("data", {}).get(
-            "action_horizon_ar", 32
+            "action_horizon_ar", 10
         )
     else:
         raise ValueError(f"Invalid mode: {args.mode}")
     config.model_device = "cuda"
 
     print("正在初始化 LiberoRobotEnv (Evaluator)...")
+
+    config.action_dim=7
+    config.pred_horizon=10
 
     evaluator = LiberoRobotEnv(
         config=config,
@@ -211,24 +214,3 @@ if __name__ == "__main__":
 
     print("评测完成。")
 
-    # if args.baseline_path is not None:
-    #     if args.update_baseline:
-    #         print("updating baseline...")
-    #         update_baseline(
-    #             args.baseline_path,
-    #             args.id,
-    #             args.name,
-    #             total_time,
-    #             total_episodes_run,
-    #             total_successes,
-    #         )
-    #     else:
-    #         print("comparing with baseline...")
-    #         check_baseline_dump(
-    #             args.baseline_path,
-    #             args.id,
-    #             args.name,
-    #             total_time,
-    #             total_episodes_run,
-    #             total_successes,
-    #         )

@@ -6,6 +6,7 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLCo
 from transformers.cache_utils import Cache
 from transformers.utils import logging
 from wall_x.fusions import ops
+from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl import apply_multimodal_rotary_pos_emb
 from flash_attn import flash_attn_func
 from transformers.modeling_flash_attention_utils import (
     is_flash_attn_greater_or_equal_2_10,
@@ -18,23 +19,23 @@ from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
 logger = logging.get_logger(__name__)
 
 
-def rotate_half(x):
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
+# def rotate_half(x):
+#     x1 = x[..., : x.shape[-1] // 2]
+#     x2 = x[..., x.shape[-1] // 2 :]
+#     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim=2):
-    mrope_section = mrope_section * 2
-    cos_split = torch.cat(
-        [m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1
-    ).unsqueeze(unsqueeze_dim)
-    sin_split = torch.cat(
-        [m[i % 3] for i, m in enumerate(sin.split(mrope_section, dim=-1))], dim=-1
-    ).unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos_split) + (rotate_half(q) * sin_split)
-    k_embed = (k * cos_split) + (rotate_half(k) * sin_split)
-    return q_embed, k_embed
+# def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim=2):
+#     mrope_section = mrope_section * 2
+#     cos_split = torch.cat(
+#         [m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1
+#     ).unsqueeze(unsqueeze_dim)
+#     sin_split = torch.cat(
+#         [m[i % 3] for i, m in enumerate(sin.split(mrope_section, dim=-1))], dim=-1
+#     ).unsqueeze(unsqueeze_dim)
+#     q_embed = (q * cos_split) + (rotate_half(q) * sin_split)
+#     k_embed = (k * cos_split) + (rotate_half(k) * sin_split)
+#     return q_embed, k_embed
 
 
 
@@ -425,10 +426,7 @@ class JointQwen2VLAttention(nn.Module):
                 cos.contiguous(),
                 sin.contiguous(),
                 self.rope_scaling["mrope_section"],
-            )
-        elif self.config.model_type == "qwen3_vl_text":
-            query_states, key_states = self.apply_rotary_pos_emb(
-                query_states, key_states, cos, sin, unsqueeze_dim
+                unsqueeze_dim
             )
         else:
             raise NotImplementedError(f"不支持的模型类型: {self.config.model_type}")

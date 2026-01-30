@@ -256,7 +256,7 @@ def format_text_with_vision_tokens(
     user_message = f"{user_request} {instruction}{text_prompt}{role_end_symbol}\n"
     assistant_output = f"{role_start_symbol}assistant\n{action_fast_symbol}{role_end_symbol}\n"
     if predict_mode == "diffusion":
-        assistant_output += f"{action_symbol * pred_horizon}"
+        assistant_output = f"{role_start_symbol}assistant\n{action_symbol * pred_horizon}{role_end_symbol}\n"
     complete_text = prologue + user_message + assistant_output
 
     return complete_text

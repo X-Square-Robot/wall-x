@@ -160,10 +160,10 @@ def compute_action_normalizer(repo_id: str, trajectory_keys: Dict, base_dir: Pat
 
 def main() -> None:
 
-    repo_id = "libero_all"
-    data_root_path = "/x2robot_v2/share/yangping/data/lerobot/benchmark/libero_all"
-    output_stats_dir = "/x2robot_v2/yangping/github/wall-x/scripts/libero_all/action_stats"
-    trajectory_keys = {
+    repo_id = "xxx" # your dataset name
+    data_root_path = "/path/to/lerobot/dataset"
+    output_stats_dir = "/path/to/save/action_stats"
+    trajectory_keys = {                             # your dataset keys
         "action":{
             "follow_right_ee_cartesian_pos": [0,3],
             "follow_right_ee_rotation": [3,6],

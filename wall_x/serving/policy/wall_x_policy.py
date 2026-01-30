@@ -173,16 +173,6 @@ class WallXPolicy(BasePolicy):
                 .to(torch.float32)
                 .numpy()
             )
-            # print("predicted_actions:", predicted_actions[0,:,-1])
-            # print("gt_action_chunk:", predicted_actions[0,0])
-            # for i in range(predicted_actions.shape[1]):
-            #     if predicted_actions[0, i, -1]>0.0:
-            #         predicted_actions[0, i, -1] = 1
-            #     else:
-            #         predicted_actions[0, i, -1] = -1
-                
-            # predicted_actions[:,:,-1] = -predicted_actions[:,:,-1]
-            # print(predicted_actions.shape)
             return {"predict_action": predicted_actions}
 
         except Exception as e:

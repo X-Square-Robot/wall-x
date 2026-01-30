@@ -8,7 +8,6 @@ import time
 from wall_x.infer.infer_config import InferConfig
 from wall_x.infer.utils import KeyboardThread
 from wall_x.infer.logger import InferLogger
-from wall_x.infer.model_wrapper import WallxModelWrapper
 
 
 class BaseEnv(ABC):
@@ -58,8 +57,8 @@ class RealRobotEnv(BaseEnv):
         self.instructions = instructions
         self.instruction_index = 0
 
-    def _register_model(self) -> WallxModelWrapper:
-        return WallxModelWrapper(self.config)
+    # def _register_model(self) -> WallxModelWrapper:
+    #     return WallxModelWrapper(self.config)
 
     def _register_robot(self):
         from wall_x.infer.robot import DesktopRobot, TurtleRobot

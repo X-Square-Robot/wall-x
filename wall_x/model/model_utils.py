@@ -69,10 +69,12 @@ def load_wallx_processors(config):
 
 
 def register_normalizers(config, model_path):
-    if config.get("customized_action_statistic_dof", None):
-        action_statistic_dof = json.load(open(config["customized_action_statistic_dof"], "r"))
-    else:
-        action_statistic_dof = default_action_statistic_dof
+    # if config.get("customized_action_statistic_dof", None):
+    #     action_statistic_dof = json.load(open(config["customized_action_statistic_dof"], "r"))
+    # else:
+    #     action_statistic_dof = default_action_statistic_dof
+
+    action_statistic_dof = None
 
     if os.path.exists(model_path+"/normalizer_action.pth"):
         print("Loading normalizer_action from checkpoint", model_path+"/normalizer_action.pth", flush=True)

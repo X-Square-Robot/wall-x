@@ -3,7 +3,7 @@ from typing import Optional, List
 from dataclasses import dataclass, field
 import numpy as np
 import torch
-import x2robot_dataset.common.data_utils as data_utils
+import wall_x.infer.data_utils as data_utils
 from wall_x.infer.logger import InferLogger
 
 dof_dims = {

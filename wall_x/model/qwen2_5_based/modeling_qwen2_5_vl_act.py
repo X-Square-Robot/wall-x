@@ -831,6 +831,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration, ActionGeneratio
         config_path=None,
         processor_path=None,
         action_tokenizer_path=None,
+        is_train=False,
         **kwargs,
     ):
         """
@@ -848,19 +849,26 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration, ActionGeneratio
         """
         # Load model components from pretrained path
 
-        with open(os.path.join(pretrained_model_path, "config.yml"), "r") as f:
-            train_config = yaml.load(f, Loader=yaml.FullLoader)
-
+        if train_config is None:
+            try:
+                with open(os.path.join(pretrained_model_path, "config.yml"), "r") as f:
+                    train_config = yaml.load(f, Loader=yaml.FullLoader)
+            except Exception as e:
+                print(f"load train_config.yml fail: {e}")
+                train_config = None
+        
         model_config_path = os.path.join(pretrained_model_path, "config.json")
         model_config = cls.config_class.from_pretrained(model_config_path)
-        
 
         model_config = update_model_config(train_config, model_config)
-        model_config._attn_implementation = "sdpa"
+        if not is_train:
+            model_config._attn_implementation = "sdpa"
    
-        processors_dict = load_wallx_processors(train_config)
-        processor = processors_dict["processor"]
-
+        if train_config is not None:
+            processors_dict = load_wallx_processors(train_config)
+            processor = processors_dict["processor"]
+        else:
+            processor = AutoProcessor.from_pretrained(model_config, use_fast=True)
 
         if action_tokenizer_path is not None:
             processor.action_processor = AutoProcessor.from_pretrained(
@@ -869,16 +877,16 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration, ActionGeneratio
 
         # Set the customized robot configuration to ensure consistency between cross-embodiment
         # representations and the Wall-X action dimensionality.
-        # if not train_config:
-        #     cls._set_customized_config(train_config)
-        #     customized_dof_config = train_config["customized_robot_config"][
-        #         "customized_dof_config"
-        #     ]
-        #     customized_agent_pos_config = train_config["customized_robot_config"][
-        #         "customized_agent_pos_config"
-        #     ]
-        #     setattr(config, "customized_dof_config", customized_dof_config)
-        #     setattr(config, "customized_agent_pos_config", customized_agent_pos_config)
+        if not train_config:
+            cls._set_customized_config(train_config)
+            customized_dof_config = train_config["customized_robot_config"][
+                "customized_dof_config"
+            ]
+            customized_agent_pos_config = train_config["customized_robot_config"][
+                "customized_agent_pos_config"
+            ]
+            setattr(model_config, "customized_dof_config", customized_dof_config)
+            setattr(model_config, "customized_agent_pos_config", customized_agent_pos_config)
 
         # Initialize model with configuration and processor
         model = cls(model_config, processor=processor, **kwargs)
@@ -2130,12 +2138,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration, ActionGeneratio
             inputs_embeds.dtype
         )
         flow_action_mask = input_ids == self.action_token_id_set["action_token_id"]
-        # print("flow_action_mask",self.action_token_id_set["action_token_id"])
-        # print("flow_action_mask.shape",flow_action_mask.shape)
-        # print("inputs_embeds.shape",inputs_embeds.shape)
-        # print("action_embed.shape",action_embed.shape)
-        # print("flow_action_mask",flow_action_mask)
-        # print("input_ids",input_ids)
+
 
         inputs_embeds[flow_action_mask] = action_embed
 
