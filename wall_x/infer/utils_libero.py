@@ -204,7 +204,7 @@ def save_rollout_data(
     Saves an NPY file of the rollout data.
     """
 
-    # 处理任务描述，使其适合作为文件名
+    # Process task description to make it suitable for filename
     processed_task_description = (
         task_description.lower()
         .replace(" ", "_")
@@ -212,10 +212,10 @@ def save_rollout_data(
         .replace(".", "_")[:50]
     )
 
-    # 构建.npy文件的路径
+    # Build .npy file path
     npy_path = f"{rollout_dir}/episode={idx}--success={success}--task={processed_task_description}--action.npy"
 
-    # 将rollout_data保存为.npy文件
+    # Save rollout_data as .npy file
     np.save(npy_path, rollout_data)
     print(f"Saved rollout data at path {npy_path}")
 
@@ -224,18 +224,18 @@ def save_rollout_data(
     titles = ["x", "y", "z", "roll", "pitch", "yaw", "grasp"]
 
     for i in range(rollout_data.shape[1]):
-        ax = axes[i]  # 选择第 i 个子图
-        ax.plot(rollout_data[:, i], label=f"Feature {i+1}")  # 绘制折线图
-        ax.set_title(titles[i])  # 设置子图标题
-        ax.set_xlabel("Time in one episode")  # 设置 x 轴标签
+        ax = axes[i]  # Select the i-th subplot
+        ax.plot(rollout_data[:, i], label=f"Feature {i+1}")  # Plot line chart
+        ax.set_title(titles[i])  # Set subplot title
+        ax.set_xlabel("Time in one episode")  # Set x-axis label
 
     axes[-1].legend(["predicted action"], loc="upper right")
 
     plt.tight_layout()
     png_path = f"{rollout_dir}/episode={idx}--success={success}--task={processed_task_description}--action.png"
-    plt.savefig(png_path, dpi=300)  # 保存图像为 PNG 文件
+    plt.savefig(png_path, dpi=300)  # Save image as PNG file
 
-    # 如果提供了日志文件，记录保存路径
+    # If log file is provided, record the save path
     if log_file is not None:
         log_file.write(f"Saved rollout data at path {npy_path}\n")
 
@@ -255,7 +255,7 @@ def save_rollout_observation(
     Saves an NPY file of the rollout data.
     """
 
-    # 处理任务描述，使其适合作为文件名
+    # Process task description to make it suitable for filename
     processed_task_description = (
         task_description.lower()
         .replace(" ", "_")
@@ -263,10 +263,10 @@ def save_rollout_observation(
         .replace(".", "_")[:50]
     )
 
-    # 构建.npy文件的路径
+    # Build .npy file path
     npy_path = f"{rollout_dir}/episode={idx}--success={success}--task={processed_task_description}--observation.npy"
 
-    # 将rollout_data保存为.npy文件
+    # Save rollout_data as .npy file
     np.save(npy_path, rollout_data)
     print(f"Saved rollout data at path {npy_path}")
 
@@ -278,18 +278,18 @@ def save_rollout_observation(
         titles = ["x", "y", "z", "roll", "pitch", "yaw", "-", "grasp"]
 
     for i in range(rollout_data.shape[1]):
-        ax = axes[i]  # 选择第 i 个子图
-        ax.plot(rollout_data[:, i], label=f"Feature {i+1}")  # 绘制折线图
-        ax.set_title(titles[i])  # 设置子图标题
-        ax.set_xlabel("Time in one episode")  # 设置 x 轴标签
+        ax = axes[i]  # Select the i-th subplot
+        ax.plot(rollout_data[:, i], label=f"Feature {i+1}")  # Plot line chart
+        ax.set_title(titles[i])  # Set subplot title
+        ax.set_xlabel("Time in one episode")  # Set x-axis label
 
     axes[-1].legend(["predicted action"], loc="upper right")
 
     plt.tight_layout()
     png_path = f"{rollout_dir}/episode={idx}--success={success}--task={processed_task_description}--observation.png"
-    plt.savefig(png_path, dpi=300)  # 保存图像为 PNG 文件
+    plt.savefig(png_path, dpi=300)  # Save image as PNG file
 
-    # 如果提供了日志文件，记录保存路径
+    # If log file is provided, record the save path
     if log_file is not None:
         log_file.write(f"Saved rollout data at path {npy_path}\n")
 

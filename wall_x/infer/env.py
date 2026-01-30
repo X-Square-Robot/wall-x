@@ -40,20 +40,20 @@ class RealRobotEnv(BaseEnv):
     ):
         """
         Args:
-            config: 推理配置
-            instruction: 任务指令
+            config: Inference configuration
+            instruction: Task instruction
         """
         super().__init__(config)
         self.instruction = "test"
         self.model = self._register_model()
         self.robot = self._register_robot()
 
-        # 键盘控制
+        # Keyboard control
         self.keyboard_thread = None
         if enable_keyboard:
             self.keyboard_thread = KeyboardThread()
 
-        # 指令列表
+        # Instruction list
         self.instructions = instructions
         self.instruction_index = 0
 
@@ -77,7 +77,7 @@ class RealRobotEnv(BaseEnv):
         self.robot.apply_action(input)
 
     def get_instruction(self) -> str:
-        """返回任务指令"""
+        """Return task instruction"""
         return self.instructions[self.instruction_index]
 
     def reset(self):
@@ -95,17 +95,17 @@ class RealRobotEnv(BaseEnv):
                 return True
             if self.keyboard_thread.new_instruction_index is not None:
                 new_index = self.keyboard_thread.new_instruction_index
-                # 检查索引是否有效
+                # Check if index is valid
                 if 0 <= new_index < len(self.instructions):
                     self.instruction_index = new_index
                     self.logger.info(
-                        f"[键盘] 指令索引已切换到 {new_index}: {self.instructions[new_index]}"
+                        f"[Keyboard] Instruction index switched to {new_index}: {self.instructions[new_index]}"
                     )
                 else:
                     self.logger.info(
-                        f"[键盘] 无效的指令索引 {new_index}，有效范围: 0-{len(self.instructions)-1}"
+                        f"[Keyboard] Invalid instruction index {new_index}, valid range: 0-{len(self.instructions)-1}"
                     )
-                # 重置标志
+                # Reset flag
                 self.keyboard_thread.new_instruction_index = None
                 time.sleep(1)
                 return True

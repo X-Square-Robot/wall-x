@@ -35,7 +35,7 @@ dof_dims = {
 
 
 class ComputedDict(dict):
-    """智能字典，支持注册计算规则，在get时自动计算None值"""
+    """Smart dictionary that supports registering computation rules and auto-computes None values on get"""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -43,45 +43,45 @@ class ComputedDict(dict):
 
     def register_compute_rule(self, key, compute_func):
         """
-        注册计算规则
+        Register a computation rule.
 
         Args:
-            key: 需要计算的键
-            compute_func: 计算函数，接收self作为参数，返回计算结果
+            key: The key that needs computation
+            compute_func: Computation function that takes self as argument and returns the computed result
         """
         self._compute_rules[key] = compute_func
 
     def get(self, key, default=None):
-        """重载get方法，支持自动计算"""
+        """Override get method to support auto-computation"""
         value = super().get(key, default)
 
-        # 如果值为None且有计算规则，尝试计算
+        # If value is None and there's a compute rule, try to compute
         if value is None and key in self._compute_rules:
             try:
                 computed_value = self._compute_rules[key](self)
                 if computed_value is not None:
-                    # 缓存计算结果
+                    # Cache the computed result
                     self[key] = computed_value
                     return computed_value
             except Exception:
-                pass  # 计算失败则返回None或default
+                pass  # If computation fails, return None or default
 
         return value if value is not None else default
 
     def __getitem__(self, key):
-        """重载[]操作符，支持自动计算"""
+        """Override [] operator to support auto-computation"""
         value = super().get(key, None)
 
-        # 如果值为None且有计算规则，尝试计算
+        # If value is None and there's a compute rule, try to compute
         if value is None and key in self._compute_rules:
             try:
                 computed_value = self._compute_rules[key](self)
                 if computed_value is not None:
-                    # 缓存计算结果
+                    # Cache the computed result
                     self[key] = computed_value
                     return computed_value
             except Exception:
-                pass  # 计算失败则抛出原始KeyError或返回None
+                pass  # If computation fails, raise original KeyError or return None
 
         if key in self:
             return super().__getitem__(key)
@@ -94,7 +94,7 @@ class RobotStateActionData:
     data: ComputedDict = field(
         default_factory=lambda: ComputedDict(
             {
-                # State (原pose) - 使用 state_ 前缀
+                # State (formerly pose) - using state_ prefix
                 "state_left_ee_cartesian_pos": None,  # (1, 3)
                 "state_left_ee_rotation": None,  # (1, 3)
                 "state_left_ee_rotation_6D": None,
@@ -113,7 +113,7 @@ class RobotStateActionData:
                 "state_height": None,
                 "state_car_pose": None,
                 "state_velocity_decomposed": None,
-                # Action - 使用 action_ 前缀
+                # Action - using action_ prefix
                 "action_left_ee_cartesian_pos": None,
                 "action_left_ee_cartesian_pos_relative": None,
                 "action_left_ee_rotation": None,
@@ -141,8 +141,8 @@ class RobotStateActionData:
     logger = InferLogger.get_robot_logger("RobotStateActionData")
 
     def __post_init__(self):
-        """注册计算规则"""
-        # State的计算规则 - euler angles -> 6D rotation
+        """Register computation rules"""
+        # State computation rules - euler angles -> 6D rotation
         self.data.register_compute_rule(
             "state_left_ee_rotation_6D",
             lambda d: (
@@ -160,7 +160,7 @@ class RobotStateActionData:
             ),
         )
 
-        # Action的计算规则 - absolute position从relative + state计算
+        # Action computation rules - absolute position computed from relative + state
         self.data.register_compute_rule(
             "action_left_ee_cartesian_pos",
             lambda d: (
@@ -182,7 +182,7 @@ class RobotStateActionData:
             ),
         )
 
-        # Action的计算规则 - 得到abs rpy
+        # Action computation rules - get absolute rpy
         self.data.register_compute_rule(  # delta rpy -> abs rpy
             "action_left_ee_rotation",
             lambda d: (
@@ -255,20 +255,20 @@ class RobotStateActionData:
 
         agent_pose_data = []
         for key in obs_action_keys:
-            # 移除follow_或master_前缀
+            # Remove follow_ or master_ prefix
             if key.startswith("follow_"):
                 key = key.replace("follow_", "")
             elif key.startswith("master_"):
                 key = key.replace("master_", "")
 
-            # 添加state_前缀来访问state数据
+            # Add state_ prefix to access state data
             state_key = f"state_{key}"
 
             if state_key in self.data:
-                # 使用get方法，会自动处理None值的计算
+                # Use get method, which will auto-handle None value computation
                 value = self.data.get(state_key)
                 if value is None:
-                    # 如果计算后仍为None，使用零向量
+                    # If still None after computation, use zero vector
                     agent_pose_data.append(np.zeros((1, dof_dims[key])))
                 else:
                     agent_pose_data.append(value)
@@ -285,17 +285,17 @@ class RobotStateActionData:
 
         agent_pos_mask_data = []
         for key in obs_action_keys:
-            # 移除follow_或master_前缀
+            # Remove follow_ or master_ prefix
             if key.startswith("follow_"):
                 key = key.replace("follow_", "")
             elif key.startswith("master_"):
                 key = key.replace("master_", "")
 
-            # 添加state_前缀来访问state数据
+            # Add state_ prefix to access state data
             state_key = f"state_{key}"
 
             if state_key in self.data:
-                # 使用get方法，会自动处理None值的计算
+                # Use get method, which will auto-handle None value computation
                 value = self.data.get(state_key)
                 if value is None:
                     agent_pos_mask_data.append(np.zeros((1, dof_dims[key])))
@@ -307,7 +307,7 @@ class RobotStateActionData:
         return np.concatenate(agent_pos_mask_data, axis=1)[None]  # (1, 1, D)
 
     def save_state_data_with_key(self, value, key):
-        # 移除follow_或master_前缀
+        # Remove follow_ or master_ prefix
         key = key.replace("follow_", "")
         key = key.replace("master_", "")
 
@@ -315,11 +315,11 @@ class RobotStateActionData:
         if isinstance(value, torch.Tensor):
             value = value.detach().cpu().numpy()
 
-        if f"state_{key}" not in self.data:  # TODO： joint angle control
-            self.logger.warning(f"{key} 不是合法的state key, 不被记录")
+        if f"state_{key}" not in self.data:  # TODO: joint angle control
+            self.logger.warning(f"{key} is not a valid state key, not recorded")
             return
 
-        # 对value进行形状检测，预期形状为（1， D）
+        # Shape validation for value, expected shape is (1, D)
         if value.shape == (1, dof_dims[key]):
             self.data[f"state_{key}"] = value
         elif value.shape == (1, 1, dof_dims[key]):
@@ -362,7 +362,7 @@ class RobotStateActionData:
             self.data[action_key] = predict_action[:, dof_start : dof_start + dof_dim]
             dof_start += dof_dim
 
-    # 为了兼容性，提供便捷的属性访问
+    # For compatibility, provide convenient property access
     @property
     def agent_pos(self):
         return self.get_agent_pos()

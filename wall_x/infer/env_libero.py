@@ -27,27 +27,28 @@ def _create_libero_env_standalone(
     seed: int = 7,
 ) -> Any:
     """
-    独立创建 Libero 环境的函数，不依赖 LiberoRobotEnv 实例。
-    用于多batch推理中子进程中创建环境，避免序列化包含 model 的大对象。
+    Standalone function to create a Libero environment, independent of LiberoRobotEnv instance.
+    Used for creating environments in subprocess during multi-batch inference,
+    avoiding serialization of large objects containing the model.
 
     Args:
-        task_id: 任务ID
-        task_suite_name: 任务套件名称
-        model_family: 模型家族
-        resolution: 分辨率
-        seed: 随机种子
+        task_id: Task ID
+        task_suite_name: Task suite name
+        model_family: Model family
+        resolution: Resolution
+        seed: Random seed
 
     Returns:
-        环境实例
+        Environment instance
     """
     from libero.libero import benchmark
 
-    # 获取任务套件和任务
+    # Get task suite and task
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[task_suite_name]()
     task = task_suite.get_task(task_id)
 
-    # 创建环境
+    # Create environment
     env, _ = get_libero_env(
         task,
         model_family=model_family,
@@ -55,7 +56,7 @@ def _create_libero_env_standalone(
         seed=seed,
     )
 
-    # 包装环境
+    # Wrap environment
     env.env = VisualizationWrapper(env.env)
     env.env.set_visualization_setting(setting="grippers", visible=False)
 
@@ -76,7 +77,7 @@ class LiberoRobotEnv(BaseEnv):
 
         super().__init__(config)
         self.logger.info(
-            f"初始化 LiberoRobotEnv (Stateless), 任务套件: {task_suite_name}"
+            f"Initializing LiberoRobotEnv (Stateless), task suite: {task_suite_name}"
         )
 
         self.model = self._register_model()
@@ -84,7 +85,7 @@ class LiberoRobotEnv(BaseEnv):
         self.resolution = resolution
         self.seed = seed
 
-        self.logger.info("正在导入 Libero 和相关 utils...")
+        self.logger.info("Importing Libero and related utils...")
         self.RobotStateActionData = RobotStateActionData
 
         self.rollout_dir = os.path.join(rollout_dir, task_suite_name)
@@ -94,7 +95,7 @@ class LiberoRobotEnv(BaseEnv):
             self.save_rollout_video = save_rollout_video
         else:
             self.save_rollout_video = None
-            self.logger.warning("未找到 save_rollout_video, 视频保存功能已禁用。")
+            self.logger.warning("save_rollout_video not found, video saving disabled.")
 
         self.task_suite_name = task_suite_name
         benchmark_dict = benchmark.get_benchmark_dict()
@@ -107,9 +108,9 @@ class LiberoRobotEnv(BaseEnv):
             try:
                 with open(self.initial_states_path, "r") as f:
                     self.all_initial_states = json.load(f)
-                self.logger.info(f"从 {self.initial_states_path} 加载了自定义初始状态")
+                self.logger.info(f"Loaded custom initial states from {self.initial_states_path}")
             except Exception as e:
-                self.logger.error(f"加载初始状态文件失败: {e}")
+                self.logger.error(f"Failed to load initial states file: {e}")
                 raise
 
     def _register_model(self) -> WallXPolicy:
@@ -155,7 +156,7 @@ class LiberoRobotEnv(BaseEnv):
     ) -> bool:
         if env is None:
             raise ValueError(
-                "在 Stateless 模式下调用 apply_action 必须显式传递 'env' 参数"
+                "In Stateless mode, apply_action must be called with explicit 'env' parameter"
             )
 
         action_data = input_data["robot_state_action_data"]
@@ -186,7 +187,7 @@ class LiberoRobotEnv(BaseEnv):
 
         except Exception as e:
             self.logger.error(f"Env step error: {e}")
-            return False  # 出错视为失败
+            return False  # Error treated as failure
 
         return done, t
 
@@ -199,10 +200,10 @@ class LiberoRobotEnv(BaseEnv):
         model_outputs: List[Dict[str, Any]],
     ) -> None:
         """
-        批量并行执行动作轨迹。
+        Execute action trajectories in parallel batch.
 
-        使用 SubprocVectorEnv 对所有活跃环境并行执行动作。
-        将 vec_env.step(batch_actions, id=still_active) 整合在此函数中。
+        Uses SubprocVectorEnv to execute actions in parallel for all active environments.
+        Integrates vec_env.step(batch_actions, id=still_active) in this function.
         """
         if not trajectories:
             return
@@ -212,7 +213,7 @@ class LiberoRobotEnv(BaseEnv):
             return
 
         for step_idx in range(max_traj_len):
-            # 检查是否还有活跃环境
+            # Check if there are still active environments
             still_active = [
                 idx
                 for idx in active_indices
@@ -223,33 +224,33 @@ class LiberoRobotEnv(BaseEnv):
             if not still_active:
                 break
 
-            # 构建批量动作（只包含 still_active 环境的动作）
+            # Build batch actions (only includes actions for still_active environments)
             batch_actions = []
             for idx in still_active:
                 traj_idx = active_indices.index(idx)
                 action_7d = trajectories[traj_idx][step_idx]
-                # 确保 action_7d 是 numpy 数组或列表
+                # Ensure action_7d is numpy array or list
                 if isinstance(action_7d, np.ndarray):
                     batch_actions.append(action_7d)
                 else:
                     batch_actions.append(np.array(action_7d))
 
-            # 转换为 numpy 数组，形状为 (batch_size, action_dim)
+            # Convert to numpy array with shape (batch_size, action_dim)
             batch_actions = np.array(batch_actions)
 
-            # 并行执行 step（只对 still_active 环境）
+            # Execute step in parallel (only for still_active environments)
             obs_list, reward_list, done_list, info_list = vec_env.step(
                 batch_actions, id=still_active
             )
 
-            # 处理返回结果
+            # Process returned results
             if obs_list.dtype == object:
                 obs_list = list(obs_list)
             else:
                 obs_list = [obs_list[i] for i in range(len(obs_list))]
             done_list = [bool(done_list[i]) for i in range(len(done_list))]
 
-            # 更新每个环境的状态
+            # Update each environment's status
             for i, idx in enumerate(still_active):
                 st = status_list[idx]
                 obs = obs_list[i]
@@ -264,18 +265,18 @@ class LiberoRobotEnv(BaseEnv):
                 st["success"] = done
                 st["done"] = done or st["count"] <= 0
 
-                # 更新 model_output 的 _last_obs
+                # Update model_output's _last_obs
                 model_outputs[active_indices.index(idx)]["_last_obs"] = obs
 
     def get_task_info(self, task_id: int) -> Tuple[str, Any]:
         """
-        获取任务信息（任务描述和初始状态），不创建环境。
+        Get task information (task description and initial states) without creating environment.
 
         Returns:
             Tuple[str, Any]: (task_desc, default_initial_states)
         """
         if task_id < 0 or task_id >= self.num_tasks:
-            raise ValueError(f"无效的任务 ID: {task_id}")
+            raise ValueError(f"Invalid task ID: {task_id}")
 
         task = self.task_suite.get_task(task_id)
         task_desc = task.language
@@ -285,7 +286,7 @@ class LiberoRobotEnv(BaseEnv):
 
     def create_env_for_task(self, task_id: int) -> Tuple[Any, str, Any]:
         if task_id < 0 or task_id >= self.num_tasks:
-            raise ValueError(f"无效的任务 ID: {task_id}")
+            raise ValueError(f"Invalid task ID: {task_id}")
 
         task = self.task_suite.get_task(task_id)
         default_initial_states = self.task_suite.get_task_init_states(task_id)
@@ -337,7 +338,7 @@ class LiberoRobotEnv(BaseEnv):
             else:
                 return env.reset()
         except Exception as e:
-            self.logger.error(f"重置失败: {e}, 回退默认重置")
+            self.logger.error(f"Reset failed: {e}, falling back to default reset")
             return env.reset()
 
     def _get_dof_mask(self):
@@ -498,40 +499,40 @@ class LiberoRobotEnv(BaseEnv):
         num_steps_wait: int = 10,
     ) -> List[bool]:
         """
-        支持批量推理：模型推理并行（batch），环境并行执行（SubprocVectorEnv）。
+        Support batch inference: model inference in parallel (batch), environment execution in parallel (SubprocVectorEnv).
 
-        使用 SubprocVectorEnv 在多batch推理中子进程中运行环境，所有环境并行执行动作。
+        Uses SubprocVectorEnv to run environments in subprocess during multi-batch inference, all environments execute actions in parallel.
 
-        返回每个样本的成功标记列表。
+        Returns a list of success flags for each sample.
         """
         if vec_env is None:
-            raise ValueError("必须指定 vec_env")
+            raise ValueError("vec_env must be specified")
         batch_size = len(vec_env)
         if task_ids is not None:
-            assert len(task_ids) == batch_size, "task_ids 长度需与 envs 一致"
+            assert len(task_ids) == batch_size, "task_ids length must match envs"
         if episode_indices is not None:
             assert (
                 len(episode_indices) == batch_size
-            ), "episode_indices 长度需与 envs 一致"
+            ), "episode_indices length must match envs"
 
         status_list = []
         for i in range(batch_size):
             status_list.append(
                 {
                     "vec_env": vec_env,
-                    "env_id": i,  # 在 vec_env 中的索引
+                    "env_id": i,  # Index in vec_env
                     "task_desc": task_descs[i],
                     "replay_images": [],
                     "num_steps": 0,
-                    "done": False,  # episode 是否结束
-                    "success": False,  # 是否成功完成
+                    "done": False,  # Whether episode has ended
+                    "success": False,  # Whether successfully completed
                     "count": max_infer_times,
                     "current_obs": None,
                     "default_states": None,
                 }
             )
 
-        # 初始化/重置：使用 SubprocVectorEnv 批量设置初始状态
+        # Initialize/reset: Use SubprocVectorEnv to batch set initial states
         init_states_to_set = []
         for i in range(batch_size):
             task_desc = task_descs[i]
@@ -543,7 +544,7 @@ class LiberoRobotEnv(BaseEnv):
             )
             init_states_to_set.append(init_state)
 
-        # 批量设置初始状态
+        # Batch set initial states
         try:
             obs_list = vec_env.set_init_state(init_states_to_set)
             if obs_list.dtype == object:
@@ -561,15 +562,15 @@ class LiberoRobotEnv(BaseEnv):
                 status_list[i]["success"] = False
                 status_list[i]["count"] = max_infer_times
         except Exception as e:
-            self.logger.error(f"批量设置初始状态失败: {e}")
+            self.logger.error(f"Failed to batch set initial states: {e}")
             raise
 
-        # 预热步骤（批量执行）
+        # Warmup steps (batch execution)
         dummy_action = get_libero_dummy_action(self.model_family)
         dummy_actions = np.array([dummy_action] * batch_size)
         for _ in range(num_steps_wait):
             obs_list, _, done_list, _ = vec_env.step(dummy_actions)
-            # 更新 current_obs
+            # Update current_obs
             if obs_list.dtype == object:
                 obs_list = list(obs_list)
             else:
@@ -578,7 +579,7 @@ class LiberoRobotEnv(BaseEnv):
                 if obs is not None:
                     status_list[i]["current_obs"] = obs
 
-        # 主循环：模型并行推理，环境并行执行（SubprocVectorEnv）
+        # Main loop: model parallel inference, environment parallel execution (SubprocVectorEnv)
         while any((not st["done"]) and st["count"] > 0 for st in status_list):
             active_indices = [
                 idx
@@ -596,11 +597,11 @@ class LiberoRobotEnv(BaseEnv):
                 observations.append(self.get_observation(st["current_obs"]))
                 instructions.append(self.get_instruction(st["task_desc"]))
 
-            # 模型批量推理
+            # Model batch inference
             model_outputs = self.model.infer_flow_action_batch(
                 observations, instructions
             )
-            # 提取所有 active 环境的 action trajectories
+            # Extract action trajectories for all active environments
             trajectories = []
             for out in model_outputs:
                 action_data = out["robot_state_action_data"]
@@ -612,11 +613,11 @@ class LiberoRobotEnv(BaseEnv):
                 ):
                     right_arm_traj = right_arm_traj.squeeze(0)
                 if right_arm_traj is None or len(right_arm_traj) == 0:
-                    # 如果轨迹为空，创建一个空轨迹
+                    # If trajectory is empty, create an empty trajectory
                     right_arm_traj = np.array([]).reshape(0, 7)
                 trajectories.append(right_arm_traj)
 
-            # 使用 apply_action_batch 并行执行动作轨迹
+            # Use apply_action_batch to execute action trajectories in parallel
             try:
                 self.apply_action_batch(
                     vec_env=vec_env,
@@ -627,12 +628,12 @@ class LiberoRobotEnv(BaseEnv):
                 )
             except Exception as e:
                 self.logger.error(f"Batch parallel action error: {e}")
-                # 标记所有活跃环境为失败
+                # Mark all active environments as failed
                 for idx in active_indices:
                     status_list[idx]["done"] = True
                     status_list[idx]["success"] = False
 
-        # 保存回放与结果
+        # Save replay and results
         success_list = []
         for i, st in enumerate(status_list):
             success = st.get("success", False)

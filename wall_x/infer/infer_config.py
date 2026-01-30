@@ -11,16 +11,16 @@ from dataclasses import dataclass, field
 @dataclass
 class X2RDataConfig:
     """
-    统一的 X2Robot 数据配置类（按 README 的 5 大模块重排）：
-      1) 数据 I/O 与缓存
-      2) 视觉输入与采样（图像/相机）
-      3) 动作与时间序列
-      4) 指令与多模态
-      5) 数据清洗与对齐（验证/增强/框架约束）
+    Unified X2Robot data configuration class (reorganized by README's 5 modules):
+      1) Data I/O and caching
+      2) Visual input and sampling (image/camera)
+      3) Action and time series
+      4) Instruction and multimodal
+      5) Data cleaning and alignment (validation/augmentation/framework constraints)
     """
 
     # ----------------------------------------------------------------------
-    # 1) 数据 I/O 与缓存
+    # 1) Data I/O and caching
     # ----------------------------------------------------------------------
     cache_dir: str = "~/.cache/dataset_cache"
     dataset_config_path: Optional[str] = None
@@ -31,12 +31,12 @@ class X2RDataConfig:
     batch_size: int = 32
     train_test_split: float = 0.9
     seed: int = 42
-    episode_chunk_size: int = 500  # VG 侧常用（Episode 分块处理的帧数）
+    episode_chunk_size: int = 500  # Commonly used on VG side (number of frames for episode chunking)
 
     # ----------------------------------------------------------------------
-    # 2) 视觉输入与采样（图像/相机）
+    # 2) Visual input and sampling (image/camera)
     # ----------------------------------------------------------------------
-    # 摄像头映射
+    # Camera mapping
     cam_mapping: Dict[str, str] = field(
         default_factory=lambda: {
             "faceImg": "face_view",
@@ -44,7 +44,7 @@ class X2RDataConfig:
             "rightImg": "right_wrist_view",
         }
     )
-    # 图像与增强
+    # Image and augmentation
     resolution: Dict[str, int] = field(
         default_factory=lambda: {
             "face_view": -1,
@@ -54,52 +54,52 @@ class X2RDataConfig:
     )
     cam_augmentation_list: List[str] = field(default_factory=list)
 
-    # 图像时序（历史/未来）
+    # Image time series (history/future)
     image_horizon: int = 1
     image_history_length: int = 0
     image_history_interval: int = 1
     future_image_length: int = 0
     future_image_interval: int = 1
     future_image_indices: Optional[List[int]] = (
-        None  # 若提供，长度必须等于 image_horizon
+        None  # If provided, length must equal image_horizon
     )
 
-    # 智能缩放
+    # Smart scaling
     max_pixels: int = field(
         default_factory=lambda: 1280 * 28 * 28
-    )  # 将在 __post_init__ 用 MAX_PIXELS 替换
+    )  # Will be replaced with MAX_PIXELS in __post_init__
     min_pixels: int = field(
         default_factory=lambda: 4 * 28 * 28
-    )  # 将在 __post_init__ 用 MIN_PIXELS 替换
-    image_factor: int = 28  # 将在 __post_init__ 用 IMAGE_FACTOR 替换
+    )  # Will be replaced with MIN_PIXELS in __post_init__
+    image_factor: int = 28  # Will be replaced with IMAGE_FACTOR in __post_init__
 
     # ----------------------------------------------------------------------
-    # 3) 动作与时间序列
+    # 3) Action and time series
     # ----------------------------------------------------------------------
     predict_action_keys: List[str] = field(default_factory=list)
     obs_action_keys: List[str] = field(default_factory=list)
 
-    # 动作窗口
+    # Action window
     action_horizon: int = 21
     action_history_length: int = 0
     action_horizon_flow: int = 32
     action_horizon_ar: int = 0
 
-    # Padding 策略
+    # Padding strategy
     left_padding: bool = True
     right_padding: bool = True
 
-    # 维度配置
-    dof_config: Dict[str, int] = field(default_factory=dict)  # 输入自由度
-    agent_pos_config: Dict[str, int] = field(default_factory=dict)  # 输出自由度
+    # Dimension configuration
+    dof_config: Dict[str, int] = field(default_factory=dict)  # Input degrees of freedom
+    agent_pos_config: Dict[str, int] = field(default_factory=dict)  # Output degrees of freedom
 
-    # 状态增强
-    state_augmentation_ratio: float = 1.0  # 增强状态的比例
-    state_augmentation_prob: float = 0.1  # mask state string的随机维度
-    state_drop_prob: float = 0.0  # 整体丢弃状态的概率
+    # State augmentation
+    state_augmentation_ratio: float = 1.0  # Ratio of augmented states
+    state_augmentation_prob: float = 0.1  # Random dimension masking probability for state string
+    state_drop_prob: float = 0.0  # Probability of dropping entire state
 
     # ----------------------------------------------------------------------
-    # 4) 指令与多模态
+    # 4) Instruction and multimodal
     # ----------------------------------------------------------------------
     default_instruction: str = ""
     instruction_path: Optional[str] = None
@@ -108,32 +108,32 @@ class X2RDataConfig:
     multimodal_chunk_size: int = 500
     generate_subtask_ratio: float = 0.0
     cot_ratio: float = 0.0
-    multimodal_data_ratio: float = 0.25  # VLA 数据集中单个 Batch 的多模态数据比例
+    multimodal_data_ratio: float = 0.25  # Multimodal data ratio per batch in VLA dataset
     instruction_key_prob: Optional[Dict[str, float]] = None
     trunc_action_with_instruction: bool = True
     use_embodied_system_prompt_ratio: float = 0.0
 
     # ----------------------------------------------------------------------
-    # 5) 数据清洗与对齐（验证/增强/框架约束）
+    # 5) Data cleaning and alignment (validation/augmentation/framework constraints)
     # ----------------------------------------------------------------------
     filter_angle_outliers: bool = False
     trim_stationary: bool = False
     use_state_string_representation: bool = False
     pad_prefix_to_same_length: bool = False
     put_ar_predict_in_postfix: bool = (
-        False  # 是否将ar预测放在postfix中,在预测模式下置为true，训练中为False
+        False  # Whether to put ar prediction in postfix, set to True in prediction mode, False in training
     )
-    pad_to_128_multiple: bool = False  # Triton Attention 要求 （废弃，常置为False）
+    pad_to_128_multiple: bool = False  # Triton Attention requirement (deprecated, always set to False)
     max_seqlen: int = 768
     model_type: Optional[str] = None  # qwen2_5, qwen2
-    model_config_path: Optional[str] = None  # 模型配置路径（用于推导 PaddingSide）
-    low_dim_obs_horizon: int = 1  # 待废弃
+    model_config_path: Optional[str] = None  # Model config path (used to derive PaddingSide)
+    low_dim_obs_horizon: int = 1  # To be deprecated
 
     # ----------------------------------------------------------------------
-    # 校验与后处理
+    # Validation and post-processing
     # ----------------------------------------------------------------------
     def __post_init__(self):
-        # TODO: 确定VGAmodel type在这里进行保model type校验
+        # TODO: Determine VGA model type validation here
         # assert self.model_type in ["qwen2_5", "qwen3"], f"Unsupported model type: {self.model_type}"
 
         if self.model_type == "qwen2_5":
@@ -145,7 +145,7 @@ class X2RDataConfig:
             self.min_pixels = 4 * 32 * 32
             self.image_factor = 32
 
-        # 未来图像索引校验
+        # Future image indices validation
         if (
             self.future_image_indices
             and len(self.future_image_indices) != self.image_horizon
@@ -155,18 +155,18 @@ class X2RDataConfig:
                 f"{len(self.future_image_indices)} != {self.image_horizon}"
             )
 
-        # 动作窗口自动推导
+        # Auto-derive action window
         if self.action_horizon == 0:
             self.action_horizon = max(self.action_horizon_flow, self.action_horizon_ar)
 
-        # 动作键自动推导
+        # Auto-derive action keys
         if not self.obs_action_keys:
             self.obs_action_keys = list(self.agent_pos_config.keys())
         if not self.predict_action_keys:
             self.predict_action_keys = list(self.dof_config.keys())
 
-        # 对PaddingSide进行推导
-        # @Ryan: 只有FlashAttention可以使用RightPadding，其他AttnImpl均使用LeftPadding
+        # Derive PaddingSide
+        # @Ryan: Only FlashAttention can use RightPadding, other AttnImpl use LeftPadding
         if self.model_config_path is not None:
             with open(self.model_config_path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
@@ -178,10 +178,10 @@ class X2RDataConfig:
             else:
                 self.padding_side = "left"
 
-    # 便利属性
+    # Convenience properties
     @property
     def use_6D_rotation(self) -> bool:
-        """是否使用 6D 旋转（根据 predict_action_keys 自动判断）"""
+        """Whether to use 6D rotation (auto-determined from predict_action_keys)"""
         if hasattr(self, "_use_6D_rotation"):
             return self._use_6D_rotation
         self._use_6D_rotation = any("6D" in key for key in self.predict_action_keys)
@@ -189,7 +189,7 @@ class X2RDataConfig:
 
     @property
     def use_relative_action(self) -> bool:
-        """是否使用相对动作（根据 predict_action_keys 自动判断）"""
+        """Whether to use relative action (auto-determined from predict_action_keys)"""
         if hasattr(self, "_use_relative_action"):
             return self._use_relative_action
         self._use_relative_action = any(
@@ -198,17 +198,17 @@ class X2RDataConfig:
         return self._use_relative_action
 
     # ----------------------------------------------------------------------
-    # YAML 初始化
+    # YAML initialization
     # ----------------------------------------------------------------------
     @classmethod
     def from_yaml_dict(cls, yaml_dict: Dict[str, Any]) -> "X2RDataConfig":
         """
-        从 YAML 配置字典创建配置对象。优先读取 data 子配置，其次读取顶层字段。
+        Create config object from YAML config dict. Prioritizes data sub-config, then top-level fields.
         """
         data_config = yaml_dict.get("data", {})
         params: Dict[str, Any] = {}
 
-        # 1) 数据 I/O 与缓存
+        # 1) Data I/O and caching
         params.update(
             {
                 "cache_dir": data_config.get(
@@ -241,7 +241,7 @@ class X2RDataConfig:
             }
         )
 
-        # 2) 视觉输入与采样（图像/相机）
+        # 2) Visual input and sampling (image/camera)
         params.update(
             {
                 "cam_mapping": data_config.get(
@@ -269,7 +269,7 @@ class X2RDataConfig:
             }
         )
 
-        # 3) 动作与时间序列
+        # 3) Action and time series
         params.update(
             {
                 "predict_action_keys": data_config.get("predict_action_keys", []),
@@ -295,7 +295,7 @@ class X2RDataConfig:
             }
         )
 
-        # 4) 指令与多模态
+        # 4) Instruction and multimodal
         params.update(
             {
                 "default_instruction": data_config.get("default_instruction", ""),
@@ -318,7 +318,7 @@ class X2RDataConfig:
             }
         )
 
-        # 5) 数据清洗与对齐（验证/增强/框架约束）
+        # 5) Data cleaning and alignment (validation/augmentation/framework constraints)
         params.update(
             {
                 "filter_angle_outliers": data_config.get(
@@ -344,13 +344,13 @@ class X2RDataConfig:
             }
         )
 
-        # 仅保留 dataclass 定义过的合法字段
+        # Only keep valid fields defined in dataclass
         valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in params.items() if k in valid_fields}
         return cls(**filtered)
 
     # ----------------------------------------------------------------------
-    # 字典式访问（便于与现有调用保持兼容）
+    # Dict-style access (for compatibility with existing calls)
     # ----------------------------------------------------------------------
     def __getitem__(self, key: str):
         try:
@@ -383,19 +383,19 @@ class InferConfig:
         robot_port: int = 33723,
         robot_id: str = "10053",
         robot_type: str = "desktop",  # ["desktop", "turtle"]
-        robot_action_start_ratio: float = 0,  # 截取动作执行的开始比例
-        robot_action_end_ratio: float = 0.8,  # 截取动作执行的最终比例
-        robot_action_interpolate_multiplier: int = 70,  # 动作插值
-        robot_use_joint_angle_control: bool = False,  # 使用关节控制（注意这时候模型需要是关节预测模型）
-        turtle_as_desktop: bool = False,  # 使用乌龟本体做桌面操作，固定底盘头移动，头部相机，和底盘高度
-        action_horizon: int = 10,  # 请正确填写模型的horizon
+        robot_action_start_ratio: float = 0,  # Action execution start ratio
+        robot_action_end_ratio: float = 0.8,  # Action execution end ratio
+        robot_action_interpolate_multiplier: int = 70,  # Action interpolation
+        robot_use_joint_angle_control: bool = False,  # Use joint control (model must be joint prediction model)
+        turtle_as_desktop: bool = False,  # Use turtle body for desktop operation, fixed chassis head movement, head camera, and chassis height
+        action_horizon: int = 10,  # Please correctly fill in the model's horizon
         action_dim: int | None = None,
         model_device: str = "cuda:0",
         num_inference_timesteps: int = 10,
         norm_key: str = "x2_normal",
         cam_names: list[str] = ["face_view", "right_wrist_view"],
     ):
-        # 私有属性用于存储路径
+        # Private attribute for storing path
         assert checkpoint_path is not None
         self._checkpoint_path = checkpoint_path
         if os.path.exists(os.path.join(checkpoint_path, "normalizer_action.pth")):
@@ -411,7 +411,7 @@ class InferConfig:
         self.action_tokenizer_path="/x2robot_v2/Models/fast/"
 
 
-        # 其他配置属性
+        # Other configuration attributes
         self.robot_host = robot_host
         self.robot_port = robot_port
         self.robot_type = robot_type  # ["desktop", "turtle"]
@@ -420,14 +420,14 @@ class InferConfig:
         self.robot_action_end_ratio = robot_action_end_ratio
         self.robot_action_interpolate_multiplier = robot_action_interpolate_multiplier
         self.robot_use_joint_angle_control = (
-            robot_use_joint_angle_control  # 使用关节角度控制
+            robot_use_joint_angle_control  # Use joint angle control
         )
         self.turtle_as_desktop = turtle_as_desktop
 
         self._action_horizon = (
-            action_horizon  # 默认由train config 的flow action horizon控制
+            action_horizon  # Default controlled by train config's flow action horizon
         )
-        self._action_dim = action_dim  # 默认由train config 的dof config决定
+        self._action_dim = action_dim  # Default determined by train config's dof config
         
         self.action_dim = action_dim
         self.pred_horizon = action_horizon
@@ -439,13 +439,13 @@ class InferConfig:
             num_inference_timesteps  # flow matching related config
         )
 
-        # 初始化配置对象
+        # Initialize config objects
         self.train_config: dict = {}
         self.model_config = None
         self.data_config = None
         self.norm_key = norm_key
         self.cam_names = cam_names
-        # 加载所有配置
+        # Load all configs
         self._load_all_configs(train_config_path)
 
     @property
@@ -454,7 +454,7 @@ class InferConfig:
 
     @checkpoint_path.setter
     def checkpoint_path(self, value: str | None):
-        """当checkpoint_path更新时，重新加载所有配置"""
+        """When checkpoint_path is updated, reload all configs"""
         if self._checkpoint_path != value:
             self._checkpoint_path = value
             self._load_all_configs()
@@ -476,12 +476,12 @@ class InferConfig:
         self._action_dim = value
 
     def _load_all_configs(self, train_config_path=None):
-        """加载所有配置的统一入口"""
+        """Unified entry point for loading all configs"""
         self._load_train_config(train_config_path)
         self._load_model_config()
         self._load_data_config()
 
-        # 更新 action_horizon 和 action_dim（如果需要）
+        # Update action_horizon and action_dim (if needed)
         if self._action_horizon is None:
             self._action_horizon = self.train_config.get("data", {}).get(
                 "action_horizon_flow", 32

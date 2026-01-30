@@ -1,24 +1,24 @@
 """
-分层级的推理日志系统
+Hierarchical Inference Logging System
 
-层级结构:
-- ENV: 环境层 (RealRobotEnv)
-- ROBOT: 机器人层 (Robot子类)
-- CONTROLLER: 控制器层 (RobotController, RobotCommunication)
-- MODEL: 模型层 (WallxModelWrapper)
-- UTILS: 工具层 (各种工具类)
+Level structure:
+- ENV: Environment layer (RealRobotEnv)
+- ROBOT: Robot layer (Robot subclasses)
+- CONTROLLER: Controller layer (RobotController, RobotCommunication)
+- MODEL: Model layer (WallxModelWrapper)
+- UTILS: Utility layer (various utility classes)
 
-使用示例:
-    # 方式1: 自动检测层级
+Usage examples:
+    # Method 1: Auto-detect level
     from wall_x.infer.logger import get_logger
     logger = get_logger(__name__)
     logger.info("This is an info message")
 
-    # 方式2: 手动指定层级
+    # Method 2: Manually specify level
     logger = get_logger(__name__, "ROBOT")
     logger.debug("Robot state updated")
 
-    # 方式3: 使用快捷方法
+    # Method 3: Use shortcut methods
     from wall_x.infer.logger import InferLogger
     logger = InferLogger.get_robot_logger("DesktopRobot")
     logger.warning("Action out of bounds")
@@ -41,20 +41,20 @@ except ImportError:
 
 class InferLogger:
     """
-    分层级的推理日志系统
+    Hierarchical inference logging system
     """
 
     _loggers = {}
     _initialized = False
 
-    # 层级定义
+    # Level definitions
     LEVEL_ENV = "ENV"
     LEVEL_ROBOT = "ROBOT"
     LEVEL_CONTROLLER = "CONTROLLER"
     LEVEL_MODEL = "MODEL"
     LEVEL_UTILS = "UTILS"
 
-    # 层级颜色映射 (用于终端输出)
+    # Level color mapping (for terminal output)
     LEVEL_COLORS = {
         LEVEL_ENV: "cyan",
         LEVEL_ROBOT: "green",
@@ -73,14 +73,14 @@ class InferLogger:
         colorful: bool = True,
     ):
         """
-        初始化日志系统
+        Initialize the logging system
 
         Args:
-            log_level: 日志级别 (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-            log_dir: 日志文件目录
-            console_output: 是否输出到控制台
-            file_output: 是否输出到文件
-            colorful: 是否使用彩色输出 (需要安装colorlog)
+            log_level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+            log_dir: Log file directory
+            console_output: Whether to output to console
+            file_output: Whether to output to file
+            colorful: Whether to use colorful output (requires colorlog)
         """
         if cls._initialized:
             return
@@ -90,7 +90,7 @@ class InferLogger:
         cls.file_output = file_output
         cls.colorful = colorful and HAS_COLORLOG
 
-        # 创建日志目录
+        # Create log directory
         if file_output and log_dir:
             cls.log_dir = Path(log_dir)
             cls.log_dir.mkdir(parents=True, exist_ok=True)
@@ -104,19 +104,19 @@ class InferLogger:
     @classmethod
     def get_logger(cls, name: str, level: str = None) -> logging.Logger:
         """
-        获取指定层级的logger
+        Get logger for specified level
 
         Args:
-            name: logger名称 (通常是模块名或类名)
-            level: 层级标识 (ENV, ROBOT, CONTROLLER, MODEL, UTILS)
+            name: Logger name (usually module name or class name)
+            level: Level identifier (ENV, ROBOT, CONTROLLER, MODEL, UTILS)
 
         Returns:
-            配置好的logger实例
+            Configured logger instance
         """
         if not cls._initialized:
             cls.setup()
 
-        # 自动检测层级
+        # Auto-detect level
         if level is None:
             level = cls._detect_level(name)
 
@@ -125,21 +125,21 @@ class InferLogger:
         if logger_key in cls._loggers:
             return cls._loggers[logger_key]
 
-        # 创建新logger
+        # Create new logger
         logger = logging.getLogger(logger_key)
         logger.setLevel(cls.log_level)
         logger.propagate = False
 
-        # 清除已有handlers
+        # Clear existing handlers
         logger.handlers.clear()
 
-        # 控制台输出
+        # Console output
         if cls.console_output:
             console_handler = logging.StreamHandler(sys.stdout)
             console_handler.setLevel(cls.log_level)
 
             if cls.colorful:
-                # 彩色格式化
+                # Colorful formatting
                 color = cls.LEVEL_COLORS.get(level, "white")
                 console_format = (
                     f"%(log_color)s[%(asctime)s]%(reset)s "
@@ -161,7 +161,7 @@ class InferLogger:
                     },
                 )
             else:
-                # 普通格式化
+                # Plain formatting
                 console_format = (
                     f"[%(asctime)s] [{level:^10}] [%(name)s] "
                     f"%(levelname)-8s %(message)s"
@@ -173,7 +173,7 @@ class InferLogger:
             console_handler.setFormatter(console_formatter)
             logger.addHandler(console_handler)
 
-        # 文件输出
+        # File output
         if cls.file_output and cls.log_file:
             file_handler = logging.FileHandler(cls.log_file, encoding="utf-8")
             file_handler.setLevel(cls.log_level)
@@ -191,7 +191,7 @@ class InferLogger:
 
     @classmethod
     def _detect_level(cls, name: str) -> str:
-        """根据名称自动检测层级"""
+        """Auto-detect level based on name"""
         name_lower = name.lower()
 
         if "env" in name_lower:
@@ -211,32 +211,32 @@ class InferLogger:
 
     @classmethod
     def get_env_logger(cls, name: str = "Environment") -> logging.Logger:
-        """获取环境层logger"""
+        """Get environment layer logger"""
         return cls.get_logger(name, cls.LEVEL_ENV)
 
     @classmethod
     def get_robot_logger(cls, name: str = "Robot") -> logging.Logger:
-        """获取机器人层logger"""
+        """Get robot layer logger"""
         return cls.get_logger(name, cls.LEVEL_ROBOT)
 
     @classmethod
     def get_controller_logger(cls, name: str = "Controller") -> logging.Logger:
-        """获取控制器层logger"""
+        """Get controller layer logger"""
         return cls.get_logger(name, cls.LEVEL_CONTROLLER)
 
     @classmethod
     def get_model_logger(cls, name: str = "Model") -> logging.Logger:
-        """获取模型层logger"""
+        """Get model layer logger"""
         return cls.get_logger(name, cls.LEVEL_MODEL)
 
     @classmethod
     def get_utils_logger(cls, name: str = "Utils") -> logging.Logger:
-        """获取工具层logger"""
+        """Get utility layer logger"""
         return cls.get_logger(name, cls.LEVEL_UTILS)
 
     @classmethod
     def set_level(cls, level: str):
-        """动态修改所有logger的日志级别"""
+        """Dynamically modify log level for all loggers"""
         new_level = getattr(logging, level.upper())
         cls.log_level = new_level
         for logger in cls._loggers.values():
@@ -246,7 +246,7 @@ class InferLogger:
 
     @classmethod
     def close_all(cls):
-        """关闭所有logger的文件句柄"""
+        """Close file handles for all loggers"""
         for logger in cls._loggers.values():
             for handler in logger.handlers[:]:
                 handler.close()
@@ -255,22 +255,22 @@ class InferLogger:
         cls._initialized = False
 
 
-# 便捷函数
+# Convenience functions
 def get_logger(name: str, level: str = None) -> logging.Logger:
     """
-    获取logger的便捷函数
+    Convenience function to get logger
 
     Args:
-        name: logger名称 (通常使用 __name__)
-        level: 层级标识 (可选,会自动检测)
+        name: Logger name (usually use __name__)
+        level: Level identifier (optional, will auto-detect)
 
     Returns:
-        配置好的logger实例
+        Configured logger instance
 
-    使用示例:
+    Usage examples:
         from wall_x.infer.logger import get_logger
-        logger = get_logger(__name__)  # 自动检测层级
-        logger = get_logger(__name__, "ROBOT")  # 手动指定层级
+        logger = get_logger(__name__)  # Auto-detect level
+        logger = get_logger(__name__, "ROBOT")  # Manually specify level
     """
     return InferLogger.get_logger(name, level)
 
@@ -283,16 +283,16 @@ def setup_logger(
     colorful: bool = True,
 ):
     """
-    设置日志系统的便捷函数
+    Convenience function to setup logging system
 
     Args:
-        log_level: 日志级别 (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        log_dir: 日志文件目录
-        console_output: 是否输出到控制台
-        file_output: 是否输出到文件
-        colorful: 是否使用彩色输出
+        log_level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        log_dir: Log file directory
+        console_output: Whether to output to console
+        file_output: Whether to output to file
+        colorful: Whether to use colorful output
 
-    使用示例:
+    Usage examples:
         from wall_x.infer.logger import setup_logger
         setup_logger(log_level="DEBUG", log_dir="./logs")
     """
