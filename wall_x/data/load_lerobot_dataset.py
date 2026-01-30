@@ -39,7 +39,8 @@ class PreprocessedDataset(Dataset[T_co]):
         dataset,
         config,
         dataload_config,
-        norm_stats,
+        normalizer_action,
+        normalizer_propri,
         lerobot_config,
         seed=42,
         rank=0,
@@ -67,7 +68,9 @@ class PreprocessedDataset(Dataset[T_co]):
         self.config = config
         self.use_fast_tokenizer = self.config.get("use_fast_tokenizer", False)
         self.dataload_config = dataload_config
-        self.norm_stats = norm_stats
+        self.normalizer_action = normalizer_action,
+        self.normalizer_propri = normalizer_propri
+        # self.norm_stats = norm_stats
         self.lerobot_config = lerobot_config
 
         self.data_config = X2RDataProcessingConfig().update(
@@ -128,6 +131,7 @@ class PreprocessedDataset(Dataset[T_co]):
         frame_index = data["frame_index"]
         instruction_info = {"instruction": data["task"]}
         generate_subtask_ratio = self.data_config.generate_subtask_ratio
+        
         complete_text, generate_subtask = get_wallx_normal_text(
             instruction_info,
             self.dataload_config.get("action_horizon", 33) - 1,
@@ -188,7 +192,7 @@ class PreprocessedDataset(Dataset[T_co]):
             sampler=sampler,  # Use distributed sampler instead of shuffle=True
             num_workers=num_workers,
             collate_fn=DataCollator(
-                self.config, self.dataload_config, self.norm_stats, self.lerobot_config
+                self.config, self.dataload_config, self.normalizer_action, self.normalizer_propri, self.lerobot_config
             ),
             pin_memory=True,  # Enable for GPU training
             persistent_workers=num_workers > 0,  # Only if num_workers > 0
@@ -240,22 +244,22 @@ class DataCollator:
     _processor_cache = {}
     _action_tokenizer_cache = {}
 
-    def __init__(self, config, dataload_config, stats, lerobot_config):
+    def __init__(self, config, dataload_config, normalizer_action, normalizer_propri, lerobot_config):
         self.config = config
         self.dataload_config = dataload_config
-        self.stats = stats
-        self.action_min_stat = stats["action"].min
-        self.action_delta = stats["action"].delta
-        self.state_min_stat = stats["state"].min
-        self.state_delta = stats["state"].delta
+
+        self.normalizer_action = normalizer_action[0]
+        self.normalizer_propri = normalizer_propri
         self.lerobot_config = lerobot_config
 
         self.use_fast_tokenizer = self.config.get("use_fast_tokenizer", False)
+        self.dataset_name = self.config["data"]["lerobot_config"].get("repo_id", "")
+        self.dataset_name = [self.dataset_name] * self.config["batch_size_per_gpu"]
         self.load_processor()
 
     def load_processor(self):
         processor_path = self.config["pretrained_wallx_path"]
-        action_tokenizer_path = self.config["action_tokenizer_path"]
+        action_tokenizer_path = self.config.get("action_tokenizer_path", None)
 
         if (
             self.use_fast_tokenizer
@@ -319,33 +323,35 @@ class DataCollator:
                 if agent_pos.dim() == 2:
                     agent_pos = agent_pos.unsqueeze(1)
                 agent_pos_mask = (~torch.isnan(agent_pos)).float()
+                # print("agent_pos_mask",agent_pos_mask.shape)
                 agent_pos.nan_to_num_(nan=0.0)
-                agent_pos = self._normalize(
-                    agent_pos, self.state_min_stat, self.state_delta
+
+                # if agent_pos.shape[-1] != 20:
+                #     agent_pos = torch.cat(
+                #         [
+                #             agent_pos,
+                #             torch.zeros(
+                #                 agent_pos.shape[0],
+                #                 agent_pos.shape[1],
+                #                 20 - agent_pos.shape[-1],
+                #             ),
+                #         ],
+                #         dim=-1,
+                #     )
+                #     agent_pos_mask = torch.cat(
+                #         [
+                #             agent_pos_mask,
+                #             torch.zeros(
+                #                 agent_pos_mask.shape[0],
+                #                 agent_pos_mask.shape[1],
+                #                 20 - agent_pos_mask.shape[-1],
+                #             ),
+                #         ],
+                #         dim=-1,
+                #     )
+                agent_pos = self.normalizer_propri.normalize_data(
+                    agent_pos, self.dataset_name
                 )
-                if agent_pos.shape[-1] != 20:
-                    agent_pos = torch.cat(
-                        [
-                            agent_pos,
-                            torch.zeros(
-                                agent_pos.shape[0],
-                                agent_pos.shape[1],
-                                20 - agent_pos.shape[-1],
-                            ),
-                        ],
-                        dim=-1,
-                    )
-                    agent_pos_mask = torch.cat(
-                        [
-                            agent_pos_mask,
-                            torch.zeros(
-                                agent_pos_mask.shape[0],
-                                agent_pos_mask.shape[1],
-                                20 - agent_pos_mask.shape[-1],
-                            ),
-                        ],
-                        dim=-1,
-                    )
                 additional_inputs["proprioception"] = agent_pos
                 additional_inputs["agent_pos_mask"] = agent_pos_mask
             elif key == "action":
@@ -354,30 +360,29 @@ class DataCollator:
                     action = action.unsqueeze(1)
                 dof_mask = (~torch.isnan(action)).float()
                 action.nan_to_num_(nan=0.0)
-                action = self._normalize(
-                    action, self.action_min_stat, self.action_delta
-                )
-                if action.shape[-1] != 20:
-                    action = torch.cat(
-                        [
-                            action,
-                            torch.zeros(
-                                action.shape[0], action.shape[1], 20 - action.shape[-1]
-                            ),
-                        ],
-                        dim=-1,
-                    )
-                    dof_mask = torch.cat(
-                        [
-                            dof_mask,
-                            torch.zeros(
-                                dof_mask.shape[0],
-                                dof_mask.shape[1],
-                                20 - dof_mask.shape[-1],
-                            ),
-                        ],
-                        dim=-1,
-                    )
+
+                # if action.shape[-1] != 20:
+                #     action = torch.cat(
+                #         [
+                #             action,
+                #             torch.zeros(
+                #                 action.shape[0], action.shape[1], 20 - action.shape[-1]
+                #             ),
+                #         ],
+                #         dim=-1,
+                #     )
+                #     dof_mask = torch.cat(
+                #         [
+                #             dof_mask,
+                #             torch.zeros(
+                #                 dof_mask.shape[0],
+                #                 dof_mask.shape[1],
+                #                 20 - dof_mask.shape[-1],
+                #             ),
+                #         ],
+                #         dim=-1,
+                #     )
+                action = self.normalizer_action.normalize_data(action, self.dataset_name)
                 additional_inputs["action_chunk"] = action
                 additional_inputs["dof_mask"] = dof_mask
             elif key == "image_inputs":
@@ -431,6 +436,8 @@ class DataCollator:
 def load_lerobot_data(
     config,
     lerobot_config,
+    normalizer_action,
+    normalizer_propri,
     rank=0,
     world_size=1,
     seed=42,
@@ -462,11 +469,11 @@ def load_lerobot_data(
     dataset_fps = meta_info.fps
     episodes_num = meta_info.total_episodes
 
-    norm_stats_path = config.get("norm_stats_path", None)
-    assert (
-        norm_stats_path is not None
-    ), "norm stats is required, please refer to 'wall-x/scripts/compute_norm_stats.py' to compute stats"
-    norm_stats = load_norm_stats(norm_stats_path, repo_id)
+    # norm_stats_path = config.get("norm_stats_path", None)
+    # assert (
+    #     norm_stats_path is not None
+    # ), "norm stats is required, please refer to 'wall-x/scripts/compute_norm_stats.py' to compute stats"
+    # norm_stats = load_norm_stats(norm_stats_path, repo_id)
 
     delta_timestamps = {
         # action chunk
@@ -500,7 +507,8 @@ def load_lerobot_data(
         train_dataset,
         config,
         dataload_config,
-        norm_stats,
+        normalizer_action,
+        normalizer_propri,
         lerobot_config,
         seed=seed,
         rank=rank,
@@ -584,13 +592,14 @@ def get_data_configs(config):
 
 class TestDataset(PreprocessedDataset):
     def __init__(
-        self, dataset, config, dataload_config, norm_stats, lerobot_config, seed=42
+        self, dataset, config, dataload_config, normalizer_action, normalizer_propri, lerobot_config, seed=42
     ):
         super().__init__(
             dataset,
             config,
             dataload_config,
-            norm_stats,
+            normalizer_action,
+            normalizer_propri,
             lerobot_config,
             seed=seed,
             rank=0,
@@ -607,7 +616,7 @@ class TestDataset(PreprocessedDataset):
             self,
             batch_size=1,
             collate_fn=DataCollator(
-                self.config, self.dataload_config, self.norm_stats, self.lerobot_config
+                self.config, self.dataload_config, self.normalizer_action, self.normalizer_propri, self.lerobot_config
             ),
         )
 
@@ -617,6 +626,8 @@ class TestDataset(PreprocessedDataset):
 def load_test_dataset(
     config,
     lerobot_config,
+    normalizer_action,
+    normalizer_propri,
     seed=42,
     episode=0,
 ):
@@ -645,7 +656,7 @@ def load_test_dataset(
     assert (
         norm_stats_path is not None
     ), "norm stats is required, please refer to 'wall-x/scripts/compute_norm_stats.py' to compute stats"
-    norm_stats = load_norm_stats(norm_stats_path, repo_id)
+    # norm_stats = load_norm_stats(norm_stats_path, repo_id)
 
     delta_timestamps = {
         # action chunk
@@ -668,7 +679,7 @@ def load_test_dataset(
     print(f"Number of frames selected: {dataset.num_frames}")
 
     dataset = TestDataset(
-        dataset, config, dataload_config, norm_stats, lerobot_config, seed=seed
+        dataset, config, dataload_config, normalizer_action, normalizer_propri, lerobot_config, seed=seed
     )
 
     return dataset

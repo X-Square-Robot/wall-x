@@ -1,12 +1,14 @@
 import os
 import gc
 import time
+import yaml
+import shutil
 import torch
 import random
 import numpy as np
 import torch.nn as nn
 import torch.distributed as dist
-
+import json
 from tqdm import tqdm
 from functools import wraps
 from datetime import datetime
@@ -16,14 +18,17 @@ from accelerate import Accelerator
 from safetensors.torch import load_file
 from transformers.optimization import get_cosine_with_min_lr_schedule_with_warmup
 from transformers import AutoProcessor
+from wall_x.model.action_head import Normalizer
 from wall_x.utils.timers import Timers
 from wall_x.model.qwen2_5_based import Qwen2_5_VLMoEForAction, Qwen2_5_VLConfig
+from wall_x.utils.constant import action_statistic_dof as default_action_statistic_dof
 from wall_x.data.config import ACTION_DATASET_NAMES, MULTIMODAL_DATASET_NAMES
 from wall_x.data.load_lerobot_dataset import (
     PreprocessedDataset,
     get_data_configs,
     load_lerobot_data,
 )
+import copy
 
 
 def timer(func):
@@ -74,6 +79,36 @@ def seed_all(seed):
     np.random.seed(seed)
     random.seed(seed)
     torch.manual_seed(seed)
+
+
+def update_model_config(train_config, model_config):
+    model_config.use_state_string_representation = train_config["data"].get(
+        "use_state_string_representation", False
+    )
+    model_config.flow_loss_weight = train_config.get("flow_loss_weight", 1.0)
+
+    model_config.dof_config = train_config["dof_config"]
+    model_config.agent_pos_config = train_config["agent_pos_config"]
+
+    model_config.action_horizon_flow = train_config["data"].get(
+        "action_horizon_flow", 32
+    )
+
+    if train_config.get("_attn_implementation", None) is not None:
+        model_config._attn_implementation = train_config["_attn_implementation"]
+
+    if train_config.get("attn_deterministic", None) is not None:
+        model_config.attn_deterministic = train_config["attn_deterministic"]
+        model_config.vision_config.attn_deterministic = train_config[
+            "attn_deterministic"
+        ]
+        print("[DEBUG] Attention is using deterministic kernel for this run!")
+    else:
+        model_config.attn_deterministic = False
+        model_config.vision_config.attn_deterministic = False
+
+    return model_config
+
 
 
 class QwenVlAct_Trainer:
@@ -145,8 +180,10 @@ class QwenVlAct_Trainer:
         self.dataload_config = get_data_configs(self.config["data"])
         self.data_config_path = data_config_path
         self.use_fast_tokenizer = self.config.get("use_fast_tokenizer", False)
+        self.use_selective_recompute = self.config.get("use_selective_recompute", False)
 
         # Load model and initialize training components
+        self.load_normalizer()
         self.load_model()
         self.action_dim = sum(self.config["dof_config"].values())
 
@@ -189,6 +226,31 @@ class QwenVlAct_Trainer:
             self.global_step = self.initial_step // self.config.get(
                 "gradient_accumulation_steps", 1
             )
+    
+    def load_normalizer(self):
+        if self.config.get("norm_stats_path", None):
+            self.print_rank0(f"loading customized action statistic dof from {self.config['norm_stats_path']}")
+            action_statistic_dof = json.load(
+                open(self.config["norm_stats_path"], "r")
+            )
+        else:
+            self.print_rank0("loading default action statistic dof from default_action_statistic_dof")
+            action_statistic_dof = default_action_statistic_dof
+
+        self.normalizer_action = Normalizer(
+            action_statistic_dof,
+            self.config["dof_config"],
+            min_key=self.config.get("min_key", "min"),
+            delta_key=self.config.get("delta_key", "delta"),
+        ) 
+
+        print("self.normalizer_action.min: ",self.normalizer_action)
+        self.normalizer_propri = Normalizer(
+            action_statistic_dof,
+            self.config["agent_pos_config"],
+            min_key=self.config.get("min_key", "min"),
+            delta_key=self.config.get("delta_key", "delta"),
+        )
 
     def print_rank0(self, msg, flush=True):
         """
@@ -228,7 +290,7 @@ class QwenVlAct_Trainer:
                 self.save_checkpoint(epoch)
 
             # Validation after each epoch
-            self.val_loop()
+            # self.val_loop()
             self.accelerator.wait_for_everyone()
 
             # Memory cleanup
@@ -532,7 +594,7 @@ class QwenVlAct_Trainer:
             model = model.to(torch.bfloat16)
         elif model_type == "qwen2_5":
 
-            config = Qwen2_5_VLConfig.from_pretrained(
+            model_config = Qwen2_5_VLConfig.from_pretrained(
                 self.config["qwen_vl_act_config_path"]
             )
             flow_loss_weight = self.config.get("flow_loss_weight", 1.0)
@@ -565,21 +627,23 @@ class QwenVlAct_Trainer:
 
             # Set the customized robot configuration to ensure consistency between cross-embodiment
             # representations and the Wall-X action dimensionality.
-            Qwen2_5_VLMoEForAction._set_customized_config(self.config)
+            # Qwen2_5_VLMoEForAction._set_customized_config(self.config)
             customized_dof_config = self.config["customized_robot_config"][
                 "customized_dof_config"
             ]
             customized_agent_pos_config = self.config["customized_robot_config"][
                 "customized_agent_pos_config"
             ]
-            setattr(config, "customized_dof_config", customized_dof_config)
-            setattr(config, "customized_agent_pos_config", customized_agent_pos_config)
+            setattr(model_config, "customized_dof_config", customized_dof_config)
+            setattr(model_config, "customized_agent_pos_config", customized_agent_pos_config)
 
+            model_config = update_model_config(self.config, model_config)
             model = Qwen2_5_VLMoEForAction(
-                config,
+                model_config,
                 self.use_fast_tokenizer,
                 self.processor,
                 flow_loss_weight=flow_loss_weight,
+                use_selective_recompute = self.use_selective_recompute
             )
 
             model = model.to(torch.bfloat16)
@@ -688,8 +752,10 @@ class QwenVlAct_Trainer:
 
         # Load LeRobot dataset
         self.dataset, self.train_num = load_lerobot_data(
-            self.config,
-            self.dataload_config.get("lerobot_config", {}),
+            config=self.config,
+            lerobot_config=self.dataload_config.get("lerobot_config", {}),
+            normalizer_action=copy.deepcopy(self.normalizer_action),
+            normalizer_propri=copy.deepcopy(self.normalizer_propri),
             rank=self.rank,
             world_size=self.world_size,
         )
@@ -754,8 +820,8 @@ class QwenVlAct_Trainer:
                 renamed_weights[key] = value
 
         # Load weights into model
-        err = model.load_state_dict(renamed_weights, strict=False)
-        self.print_rank0(f"Weight loading report: {err}", flush=True)
+        # err = model.load_state_dict(renamed_weights, strict=False)
+        # self.print_rank0(f"Weight loading report: {err}", flush=True)
         if self.accelerator.is_main_process:
             self.print_rank0(f"Loaded pretrained weights from: {pretrain_weight_path}")
 
@@ -802,36 +868,111 @@ class QwenVlAct_Trainer:
         self.timers.log(timers_to_log, normalizer=1)
 
     def save_checkpoint(self, epoch, step=0):
-        """
-        Save training checkpoint.
-
-        Args:
-            epoch (int): Current epoch number
-            step (int, optional): Current step number. Defaults to 0.
-
-        Saves model state, optimizer state, and training progress information.
-        """
         save_path = self.config["save_path"]
         if step == 0:
             ckpt_path = f"{save_path}/{epoch}"
         else:
             ckpt_path = f"{save_path}/{epoch}_{step}"
-
-        # If FSDP SHARDED_STATE_DICT is used, please refer to the wall-x/workspace/README.md
-        # merge checkpoint section to merge the weights into a single safetensors if needed.
         self.accelerator.save_state(ckpt_path)
 
+        # Save random seed
         if self.accelerator.is_main_process:
-            self.processor.save_pretrained(os.path.join(ckpt_path, "processor"))
+            # FIXME the dataset does not have random seed now. Should the dataset set the random seed?
+            torch.save(
+                {"seed": self.seed}, os.path.join(ckpt_path, "seed.pth")
+            )  # seed is shared by all ranks; seed follows dataset
+            torch.save(
+                {"global_step": self.global_step},
+                os.path.join(ckpt_path, "global_step.pth"),
+            )
+            torch.save(
+                {"current_epoch": epoch}, os.path.join(ckpt_path, "current_epoch.pth")
+            )
 
-        # Save current iteration steps for dataset resuming
-        if step != 0:
+            # Save configuration in YAML format
+            config_path = os.path.join(ckpt_path, "config.yml")
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.dump(
+                    self.config,
+                    f,
+                    default_flow_style=False,
+                    allow_unicode=True,
+                    indent=2,
+                    sort_keys=False,
+                )
+
+            pretrained_dir = self.config.get("pretrained_qwen_vl_path", None)
+            if pretrained_dir is not None:
+                files_to_copy = [
+                    "preprocessor_config.json",
+                    "tokenizer_config.json",
+                    "tokenizer.json",
+                    "vocab.json",
+                ]
+
+                for filename in files_to_copy:
+                    src = os.path.join(pretrained_dir, filename)
+                    dst = os.path.join(ckpt_path, filename)
+
+                    if os.path.exists(src):
+                        shutil.copy(src, dst)
+                        print(f"[Checkpoint] Copied {filename} to {ckpt_path}")
+                    else:
+                        print(f"[Checkpoint] WARNING: {src} not found, skip copying.")
+
+            act_config_path = self.config.get("qwen_vl_act_config_path", None)
+            if act_config_path is not None:
+                dst = os.path.join(ckpt_path, "config.json")
+
+                if os.path.exists(act_config_path):
+                    shutil.copy(act_config_path, dst)
+                    print(f"[Checkpoint] Copied act config to {dst}")
+                else:
+                    print(
+                        f"[Checkpoint] WARNING: {act_config_path} not found, skipping."
+                    )
+            # Save normalizer
+            torch.save(
+                self.normalizer_action.state_dict(),
+                os.path.join(ckpt_path, "normalizer_action.pth"),
+            )
+            torch.save(
+                self.normalizer_propri.state_dict(),
+                os.path.join(ckpt_path, "normalizer_propri.pth"),
+            )
+
+
+        # Save current iter steps
+        if step != 0:  # step==0, no need for dataset resume
             _rank = self.accelerator.process_index
-            if isinstance(self.dataset, PreprocessedDataset):
+            if self.data_config["multimodal_data_ratio"] != 1:
                 torch.save(
-                    {"epoch": epoch, "step": step},
+                    {
+                        "episode_start_index": self.dataset.primary_pool_start_index.value
+                    },
+                    os.path.join(ckpt_path, f"episode_start_index_rank_{_rank}.pth"),
+                )
+                torch.save(
+                    {
+                        "multimodal_episode_start_index": self.dataset.secondary_pool_start_index.value
+                    },
                     os.path.join(
-                        ckpt_path, f"epoch_{epoch}_step_{step}_rank_{_rank}.pth"
+                        ckpt_path, f"multimodal_episode_start_index_rank_{_rank}.pth"
+                    ),
+                )
+            else:
+                torch.save(
+                    {
+                        "episode_start_index": self.dataset.secondary_pool_start_index.value
+                    },
+                    os.path.join(ckpt_path, f"episode_start_index_rank_{_rank}.pth"),
+                )
+                torch.save(
+                    {
+                        "multimodal_episode_start_index": self.dataset.primary_pool_start_index.value
+                    },
+                    os.path.join(
+                        ckpt_path, f"multimodal_episode_start_index_rank_{_rank}.pth"
                     ),
                 )
 
@@ -862,9 +1003,60 @@ class QwenVlAct_Trainer:
                 self.model.load_state_dict(new_state_dict, strict=False)
         else:
             # Load full checkpoint including optimizer and scheduler states
-            self.accelerator.load_state(checkpoint_path)
+        
+            # self.accelerator.load_state(checkpoint_path)
+            state_dict = load_file(self.config["resume"]["ckpt"] + "/model.safetensors", device="cpu")
 
-        self.print_rank0(f"\033[32mResumed from checkpoint: {checkpoint_path}\033[0m")
+
+            filtered_state_dict = {
+                k: v
+                for k, v in state_dict.items()
+                if not k.startswith("action_preprocessor.normalizer")
+            }
+
+            if self.config["resume"].get("try_harder", False):
+                new_state_dict = {}
+                for name, param in filtered_state_dict.items():
+                    if name in self.model.state_dict():
+                        if param.size() == self.model.state_dict()[name].size():
+                            new_state_dict[name] = param
+                        else:
+                            size_0 = param.size()
+                            size_1 = self.model.state_dict()[name].size()
+                            new_state_dict[name] = self.model.state_dict()[name]
+                            slices = [
+                                slice(0, min(old_dim, new_dim))
+                                for old_dim, new_dim in zip(size_0, size_1)
+                            ]
+                            new_state_dict[name][slices] = param[slices]
+                            self.print_rank0(
+                                f"Not match key: {name}, required shape: {size_1}, loaded shape: {size_0}, new shape: {new_state_dict[name].size()}"
+                            )
+                    elif "module."+name in self.model.state_dict():
+                        name = "module."+name
+                        if param.size() == self.model.state_dict()[name].size():
+                            new_state_dict[name] = param
+                        else:
+                            size_0 = param.size()
+                            size_1 = self.model.state_dict()[name].size()
+                            new_state_dict[name] = self.model.state_dict()[name]
+                            slices = [
+                                slice(0, min(old_dim, new_dim))
+                                for old_dim, new_dim in zip(size_0, size_1)
+                            ]
+                            new_state_dict[name][slices] = param[slices]
+                            self.print_rank0(
+                                f"Not match key: {name}, required shape: {size_1}, loaded shape: {size_0}, new shape: {new_state_dict[name].size()}"
+                            )
+                    else:
+                        self.print_rank0(
+                            f"Not used parameter: {name}"
+                        )
+                err = self.model.load_state_dict(new_state_dict, strict=False)
+            else:
+                err = self.model.load_state_dict(filtered_state_dict, strict=False)
+        
+            self.print_rank0(f"err in load model: {err}", err)
 
     def _load_fsdp_state_dict_with_distribute_tensor(self):
 

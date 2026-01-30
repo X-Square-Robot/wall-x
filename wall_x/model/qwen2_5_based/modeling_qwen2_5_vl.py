@@ -120,23 +120,71 @@ class Qwen2_5_VisionRotaryEmbedding(nn.Module):
 
 
 class Qwen2RMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
+    def __init__(
+        self, hidden_size: int, eps: float = 1e-6, cond_dim: Optional[int] = None
+    ):
         """
-        Qwen2RMSNorm is equivalent to T5LayerNorm
+        Qwen2RMSNorm with optional conditional input support, equivalent to T5LayerNorm
         """
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
+        self.hidden_size = hidden_size
+        self.cond_dim = cond_dim
 
-    def forward(self, hidden_states):
+        # Dense layer for adaptive normalization (if cond_dim is provided)
+        if cond_dim is not None:
+            self.dense = nn.Linear(cond_dim, hidden_size * 3, bias=True)
+            nn.init.zeros_(self.dense.weight)
+        else:
+            self.dense = None
+            self.weight = nn.Parameter(torch.ones(hidden_size))
+
+    def _norm(self, x):
+        # Compute variance in float32 for numerical stability
+        variance = x.pow(2).mean(-1, keepdim=True)
+        # Compute normalization
+        normed_inputs = x * torch.rsqrt(variance + self.variance_epsilon)
+        return normed_inputs
+
+    def forward(self, hidden_states, cond=None):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
+        normed_inputs = self._norm(hidden_states)
+
+        if cond is None or self.dense is None:
+            # Regular RMSNorm
+            normed_inputs = self.weight * normed_inputs
+            return normed_inputs.to(input_dtype), None
+
+        # Adaptive RMSNorm
+        if cond.shape[-1] != self.cond_dim:
+            raise ValueError(
+                f"Expected cond dimension {self.cond_dim}, got {cond.shape[-1]}"
+            )
+
+        # Compute modulation parameters
+        cond = cond.to(dtype=self.dense.weight.dtype)
+        modulation = self.dense(cond)
+        if len(hidden_states.shape) == 3:  # [batch, seq, features]
+            modulation = modulation.unsqueeze(1)
+
+        scale, shift, gate = torch.chunk(modulation, 3, dim=-1)
+
+        # Apply adaptive normalization
+        normed_inputs = normed_inputs * (1 + scale.to(torch.float32)) + shift.to(
+            torch.float32
+        )
+
+        return normed_inputs.to(input_dtype), gate.to(input_dtype)
 
     def extra_repr(self):
-        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+        repr_str = f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+        if self.dense is not None:
+            repr_str += f", adaptive=True, cond_dim={self.cond_dim}"
+        return repr_str
+
+
+
 
 
 class Qwen2_5_VLPatchMerger(nn.Module):
@@ -151,7 +199,7 @@ class Qwen2_5_VLPatchMerger(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.mlp(self.ln_q(x).view(-1, self.hidden_size))
+        x = self.mlp(self.ln_q(x)[0].view(-1, self.hidden_size))
         return x
 
 
@@ -381,13 +429,13 @@ class Qwen2_5_VLVisionBlock(nn.Module):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
-            self.norm1(hidden_states),
+            self.norm1(hidden_states)[0],
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             rotary_pos_emb=rotary_pos_emb,
             position_embeddings=position_embeddings,
         )
-        hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
+        hidden_states = hidden_states + self.mlp(self.norm2(hidden_states)[0])
         return hidden_states
 
 
@@ -1082,16 +1130,39 @@ class Qwen2_5_VLSdpaAttention(Qwen2_5_VLAttention):
                 "cos": cos,
                 "cache_position": cache_position,
             }  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(
-                key_states, value_states, self.layer_idx, cache_kwargs
-            )
+            if use_cache:
+                key_states, value_states = past_key_value.update(
+                    key_states, value_states, self.layer_idx, cache_kwargs
+                )
+            else:
+                past_key_states, past_value_states = past_key_value[self.layer_idx]
+                key_states = torch.cat([past_key_states, key_states], dim=-2)
+                value_states = torch.cat([past_value_states, value_states], dim=-2)
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         causal_mask = attention_mask
         if attention_mask is not None:  # no matter the length, we just slice it
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+            # 确保attention_mask在head维度上正确匹配
+            if len(attention_mask.shape) == 2:  # [batch_size, seq_len]
+                # 扩展为 [batch_size, 1, seq_len, seq_len] 的因果掩码格式
+                bsz, seq_len = attention_mask.shape
+                causal_mask = attention_mask.view(bsz, 1, 1, seq_len).expand(
+                    bsz, 1, seq_len, seq_len
+                )
+            elif len(attention_mask.shape) == 3:  # [batch_size, seq_len, seq_len]
+                # 添加head维度：[batch_size, 1, seq_len, seq_len]
+                causal_mask = attention_mask.unsqueeze(1)
+            elif (
+                len(attention_mask.shape) == 4
+            ):  # [batch_size, num_heads, seq_len, seq_len]
+                causal_mask = attention_mask
+            else:
+                raise ValueError(f"不支持的attention_mask维度: {attention_mask.shape}")
+
+            # 将attention mask转化成布尔类型
+            causal_mask = causal_mask.to(torch.bool)
 
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
@@ -1104,6 +1175,18 @@ class Qwen2_5_VLSdpaAttention(Qwen2_5_VLAttention):
         # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
         # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
         is_causal = True if causal_mask is None and q_len > 1 else False
+
+        if q_len == 1:
+            is_causal = False
+            causal_mask = torch.ones(
+                bsz,
+                1,
+                1,
+                key_states.shape[2],
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            ).contiguous()
+            causal_mask = causal_mask.to(torch.bool)
 
         attn_output = torch.nn.functional.scaled_dot_product_attention(
             query_states,

@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 def prepare_batch(
     obs: Dict,
     processor,
+    normalizer_propri,
     camera_key: List[str],
     agent_pos_dim,
     action_dim,
@@ -84,6 +85,7 @@ def prepare_batch(
                 img = Image.fromarray((img * 255).astype(np.uint8))
         processed_images.append(img)
 
+    # print("processed_images:",processed_images)
     # Apply smart resize to images
     resized_images = process_images(
         processed_images, image_factor, min_pixels, max_pixels
@@ -109,7 +111,9 @@ def prepare_batch(
 
     action_token_id = processor.tokenizer.convert_tokens_to_ids("<|action|>")
     moe_token_types = inputs.input_ids == action_token_id
-    inputs["moe_token_types"] = moe_token_types
+    inputs["moe_token_types"] = torch.tensor(moe_token_types)
+
+    # obs["dataset_names"]="libero_all"
 
     # Handle robot state/proprioception if available
     if "state" in obs:
@@ -126,20 +130,22 @@ def prepare_batch(
             state = state.unsqueeze(1)  # [batch, 1, state_dim]
 
         # Pad to 20 dimensions if needed (same as training)
-        if state.shape[-1] < 20:
-            padding = torch.zeros(state.shape[0], state.shape[1], 20 - state.shape[-1])
-            state = torch.cat([state, padding], dim=-1)
+        # if state.shape[-1] < 20:
+        #     padding = torch.zeros(state.shape[0], state.shape[1], 20 - state.shape[-1])
+        #     state = torch.cat([state, padding], dim=-1)
 
         # Create mask for valid dimensions
         agent_pos_mask = torch.ones_like(state)
         if state.shape[-1] > agent_pos_dim:
             agent_pos_mask[:, :, agent_pos_dim:] = 0
 
+        normalizer_propri.normalize_data(state, [obs["dataset_names"]]*state.shape[0])
+        
         inputs["proprioception"] = state
         inputs["agent_pos_mask"] = agent_pos_mask
 
     # Add dataset name (required by model)
-    inputs["dataset_names"] = obs["dataset_names"]
+    inputs["dataset_names"] = [obs["dataset_names"]]*state.shape[0]
 
     # Move all tensors to device
     for key in inputs:
@@ -168,9 +174,21 @@ def process_images(
     """
     resized_images = []
     for img_pil in images:
-        current_width, current_height = img_pil.size
+        
+        orig_width, orig_height = img_pil.size
+        target_size = 256
+        if target_size != -1:
+            # Maintain aspect ratio logic
+            if orig_width > orig_height:  # Landscape image
+                new_width = target_size
+                new_height = int(target_size * orig_height / orig_width)
+            else:  # Portrait image
+                new_height = target_size
+                new_width = int(target_size * orig_width / orig_height)
+            img_pil = img_pil.resize((new_width, new_height))
 
         # Apply smart scaling (Qwen logic)
+        current_width, current_height = img_pil.size
         resized_height, resized_width = smart_resize(
             current_height,
             current_width,
@@ -184,11 +202,10 @@ def process_images(
 
     return resized_images
 
-
 def format_text_with_vision_tokens(
     instruction: str,
     camera_key: List[str],
-    predict_mode: str = "fast",
+    predict_mode: str = "diffusion",
     pred_horizon: int = 32,
 ) -> str:
     """Format text prompt with vision tokens for the model.
@@ -208,7 +225,7 @@ def format_text_with_vision_tokens(
     image_pad_symbol = "<|image_pad|>"
     propri_symbol = "<|propri|>"
     action_symbol = "<|action|>"
-    # action_fast_symbol = "<|action_fast|>"
+    action_fast_symbol = "<|action_fast|>"
 
     # Camera name mapping
     camera_name_mapping = {
@@ -237,9 +254,9 @@ def format_text_with_vision_tokens(
         f"\nPredict the next action in robot action.\nProprioception: {propri_symbol}\n"
     )
     user_message = f"{user_request} {instruction}{text_prompt}{role_end_symbol}\n"
-    assistant_output = f"{role_start_symbol}assistant\n"
+    assistant_output = f"{role_start_symbol}assistant\n{action_fast_symbol}{role_end_symbol}\n"
     if predict_mode == "diffusion":
-        assistant_output += f"{action_symbol * pred_horizon}"
+        assistant_output = f"{role_start_symbol}assistant\n{action_symbol * pred_horizon}{role_end_symbol}\n"
     complete_text = prologue + user_message + assistant_output
 
     return complete_text

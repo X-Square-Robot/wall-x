@@ -1,12 +1,14 @@
 import logging
 from typing import Dict, Any, List
 import torch
+import copy
 import numpy as np
 from transformers import AutoProcessor
-
+import os
 from wall_x.serving.websocket_policy_server import BasePolicy
 from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl_act import Qwen2_5_VLMoEForAction
 from wall_x.serving.policy.utils import prepare_batch
+from wall_x.model.model_utils import load_wallx_processors, register_normalizers
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +27,7 @@ class WallXPolicy(BasePolicy):
         camera_key: List[str],
         device: str = "cuda",
         dtype: str = "bfloat16",
-        predict_mode: str = "fast",
+        predict_mode: str = "diffusion",
         default_prompt: str | None = None,
         min_pixels: int = 4 * 28 * 28,
         max_pixels: int = 16384 * 28 * 28,
@@ -50,21 +52,23 @@ class WallXPolicy(BasePolicy):
         """
         logger.info(f"Loading Wall-X model from {model_path}")
 
+        self.normalizer_action, self.normalizer_propri = register_normalizers(train_config, model_path)
+
         self.model = Qwen2_5_VLMoEForAction.from_pretrained(
             model_path,
             train_config=train_config,
             action_tokenizer_path=action_tokenizer_path,
         )
+        self.model.set_normalizer(copy.deepcopy(self.normalizer_action), copy.deepcopy(self.normalizer_propri))
         self.model.eval()
         self.model = self.model.to(device)
-
-        self.model = self.model.bfloat16()
+        self.model.to_bfloat16_for_selected_params()
 
         # hard code the action dim to 20 for align to wall-x configuration
-        self.fixed_action_dim = 20
+        self.fixed_action_dim = action_dim
 
         self.action_dim = action_dim
-        self.agent_pos_dim = agent_pos_dim
+        self.agent_pos_dim = action_dim
         self.pred_horizon = pred_horizon
         self.device = device
         self.predict_mode = predict_mode
@@ -77,10 +81,14 @@ class WallXPolicy(BasePolicy):
         self.image_factor = image_factor
         self.max_length = max_length
 
+        print("predict_mode",predict_mode)
+        print("camera_key",camera_key)
+
         # Load processor
         logger.info("Loading processor and tokenizer...")
-        self.processor = AutoProcessor.from_pretrained(model_path, use_fast=True)
-        self.processor.tokenizer.padding_side = "left"
+
+        processors_dict = load_wallx_processors(train_config)
+        self.processor = processors_dict["processor"]
 
         # Action buffer for multi-step predictions
         self.action_buffer = []
@@ -126,6 +134,7 @@ class WallXPolicy(BasePolicy):
             input_batch = prepare_batch(
                 obs,
                 self.processor,
+                self.normalizer_propri,
                 self.camera_key,
                 self.agent_pos_dim,
                 self.action_dim,
@@ -147,7 +156,7 @@ class WallXPolicy(BasePolicy):
                         if self.predict_mode == "fast"
                         else self.fixed_action_dim
                     ),
-                    pred_horizon=self.pred_horizon,
+                    action_horizon=self.pred_horizon,
                     mode="predict",
                     predict_mode=self.predict_mode,
                 )
@@ -164,9 +173,7 @@ class WallXPolicy(BasePolicy):
                 .to(torch.float32)
                 .numpy()
             )
-
-            print(predicted_actions.shape)
-            return {"action": predicted_actions}
+            return {"predict_action": predicted_actions}
 
         except Exception as e:
             logger.error(f"Error during inference: {e}")

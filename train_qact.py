@@ -64,7 +64,7 @@ def setup_accelerator(config):
         kwargs_handlers=[ddp_kwargs],
         mixed_precision="bf16",
         fsdp_plugin=fsdp_plugin,
-        dynamo_plugin=dynamo_plugin,
+        # dynamo_plugin=dynamo_plugin,
         dataloader_config=accelerator_dataloader_config,
         gradient_accumulation_steps=config.get("gradient_accumulation_steps", 1),
     )

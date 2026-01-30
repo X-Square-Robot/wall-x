@@ -2,14 +2,22 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor
 import yaml
+import os
 
 from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl_act import Qwen2_5_VLMoEForAction
 
 
 class VQAWrapper(object):
-    def __init__(self, model_path: str, train_config: dict):
+    def __init__(self, model_path: str, train_config: dict=None):
+
         self.device = self._setup_device()
-        self.processor = self._load_processor(model_path)
+        if train_config is None:
+            try:
+                with open(os.path.join(model_path, "config.yml"), "r") as f:
+                    train_config = yaml.load(f, Loader=yaml.FullLoader)
+            except Exception as e:
+                print(f"load train_config.yml fail: {e}")
+        self.processor = self._load_processor(train_config["processor_path"])
         self.model = self._load_model(model_path, train_config)
 
     def _setup_device(self) -> str:
@@ -69,8 +77,8 @@ class VQAWrapper(object):
 
 
 if __name__ == "__main__":
-    MODEL_PATH_FOR_MODULE_TEST = "/path/to/model"
-    train_config_path = "/path/to/config.yaml"
+    MODEL_PATH_FOR_MODULE_TEST = "/path/to/model_path"
+    train_config_path = "/path/to/model_path/config.yml"
     with open(train_config_path, "r") as f:
         train_config = yaml.load(f, Loader=yaml.FullLoader)
     wrapper = VQAWrapper(
@@ -81,7 +89,7 @@ if __name__ == "__main__":
         test_question = "To move the red block in the plate with same color, what should you do next? Think step by step."
 
         # Local Image
-        img = Image.open("/path/to/wall-x/assets/cot_example_frame.png").convert("RGB")
+        img = Image.open("/x2robot_v2/yangping/github/wall-x/assets/cot_example_frame.png").convert("RGB")
         # Internet Image
         # import requests
         # test_image_url = "https://www.ilankelman.org/stopsigns/australia.jpg"

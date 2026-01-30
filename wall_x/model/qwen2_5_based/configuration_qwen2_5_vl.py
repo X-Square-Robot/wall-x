@@ -21,6 +21,9 @@ class Qwen2_5_VLVisionConfig(PretrainedConfig):
         window_size=112,
         out_hidden_size=3584,
         fullatt_block_indexes=[7, 15, 23, 31],
+        initializer_range=0.02,
+        _attn_implementation="flash_attention_2",
+        attn_deterministic=False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -38,6 +41,9 @@ class Qwen2_5_VLVisionConfig(PretrainedConfig):
         self.window_size = window_size
         self.fullatt_block_indexes = fullatt_block_indexes
         self.out_hidden_size = out_hidden_size
+        self.initializer_range = initializer_range
+        self._attn_implementation = _attn_implementation
+        self.attn_deterministic=attn_deterministic
 
 
 class Qwen2_5_VLConfig(PretrainedConfig):
@@ -169,6 +175,8 @@ class Qwen2_5_VLConfig(PretrainedConfig):
         self,
         vocab_size=152064,
         hidden_size=8192,
+        action_hidden_size=2048,
+        state_hidden_size=2048,
         intermediate_size=29568,
         num_hidden_layers=80,
         num_attention_heads=64,
@@ -193,16 +201,25 @@ class Qwen2_5_VLConfig(PretrainedConfig):
         dim_inputs=(1536, 1536),
         attention_moe=False,
         mlp_moe=False,
+        norm_moe=False,
+        mot_opt=False,
+        flow_loss_weight=10,
+        use_state_string_representation=False,
+        use_adarms=False,
+        proj_with_mask=True,
+        use_flow_action_expert=True,
+        adarms_cond_dim=None,
+        action_horizon_flow=32,
+        causal_action_attention_mask=False,
+        use_x_pred=False,
+        attn_deterministic=False,
         **kwargs,
     ):
-        if isinstance(vision_config, dict):
-            self.vision_config = self.sub_configs["vision_config"](**vision_config)
-        elif vision_config is None:
-            self.vision_config = self.sub_configs["vision_config"]()
-
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
         self.hidden_size = hidden_size
+        self.action_hidden_size = action_hidden_size
+        self.state_hidden_size = state_hidden_size
         self.intermediate_size = intermediate_size
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
@@ -230,6 +247,19 @@ class Qwen2_5_VLConfig(PretrainedConfig):
         self.dim_inputs = tuple(dim_inputs)
         self.attention_moe = attention_moe
         self.mlp_moe = mlp_moe
+        self.norm_moe = norm_moe
+        self.mot_opt = mot_opt
+        self.flow_loss_weight = flow_loss_weight
+
+        self.use_state_string_representation = use_state_string_representation
+        self.use_adarms = use_adarms
+        self.adarms_cond_dim = adarms_cond_dim
+        self.proj_with_mask = proj_with_mask
+        self.use_flow_action_expert = use_flow_action_expert
+        self.action_horizon_flow = action_horizon_flow
+        self.causal_action_attention_mask = causal_action_attention_mask
+        self.use_x_pred = use_x_pred
+        self.attn_deterministic=attn_deterministic
 
         # Validate the correctness of rotary position embeddings parameters
         # BC: if there is a 'type' field, move it to 'rope_type'.
@@ -243,6 +273,13 @@ class Qwen2_5_VLConfig(PretrainedConfig):
         rope_config_validation(self, ignore_keys={"mrope_section"})
 
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
+
+        # move vision config initialization after super init to avoid recursively set in latest transformers version
+        # TODO: make it better
+        if isinstance(vision_config, dict):
+            self.vision_config = self.sub_configs["vision_config"](**vision_config)
+        elif vision_config is None:
+            self.vision_config = self.sub_configs["vision_config"]()
 
 
 __all__ = ["Qwen2_5_VLConfig"]
