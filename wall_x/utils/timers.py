@@ -1,3 +1,6 @@
+# Copyright (c) 2025, X-Square-Robot
+# SPDX-License-Identifier: BSD-3-Clause
+
 import time
 from torch.cuda import nvtx
 from abc import ABC, abstractmethod

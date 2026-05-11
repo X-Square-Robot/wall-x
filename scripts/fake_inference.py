@@ -1,3 +1,6 @@
+# Copyright (c) 2025, X-Square-Robot
+# SPDX-License-Identifier: BSD-3-Clause
+
 import torch
 from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl_act import Qwen2_5_VLMoEForAction
 

@@ -1,3 +1,6 @@
+# Copyright (c) 2025, X-Square-Robot
+# SPDX-License-Identifier: BSD-3-Clause
+
 """Utils for evaluating policies in LIBERO simulation environments."""
 
 import math
