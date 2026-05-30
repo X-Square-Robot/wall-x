@@ -1,3 +1,6 @@
+# Copyright (c) 2025, X-Square-Robot
+# SPDX-License-Identifier: BSD-3-Clause
+
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_rope_utils import rope_config_validation
 

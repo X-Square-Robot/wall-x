@@ -1,3 +1,6 @@
+# Copyright (c) 2025, X-Square-Robot
+# SPDX-License-Identifier: BSD-3-Clause
+
 """
 High-performance C++ backend interface for optimized matrix operations.
 

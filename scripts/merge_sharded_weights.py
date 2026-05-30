@@ -1,4 +1,7 @@
 #!/usr/bin/env python
+# Copyright (c) 2025, X-Square-Robot
+# SPDX-License-Identifier: BSD-3-Clause
+
 """
 Custom script to merge FSDP sharded checkpoints with compatibility handling.
 Works around the StorageMeta compatibility issue between PyTorch versions.

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) 2025, X-Square-Robot
+# SPDX-License-Identifier: BSD-3-Clause
+
 """
 Server script for Wall-X model.
 

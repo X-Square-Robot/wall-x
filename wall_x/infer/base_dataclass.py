@@ -1,3 +1,6 @@
+# Copyright (c) 2025, X-Square-Robot
+# SPDX-License-Identifier: BSD-3-Clause
+
 from wall_x.infer.infer_config import InferConfig
 from typing import Optional, List
 from dataclasses import dataclass, field

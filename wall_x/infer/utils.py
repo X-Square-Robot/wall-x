@@ -1,3 +1,6 @@
+# Copyright (c) 2025, X-Square-Robot
+# SPDX-License-Identifier: BSD-3-Clause
+
 import numpy as np
 from scipy.signal import savgol_filter
 from scipy.spatial.transform import Rotation as R  # TODO: Convert to numba functions
