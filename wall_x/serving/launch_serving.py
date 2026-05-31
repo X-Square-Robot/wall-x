@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
-"""
-Server script for Wall-X model.
-
-This script serves a Wall-X model using a websocket server, allowing
-clients to connect and get action predictions from observations.
-
-Based on the OpenPI serve_policy.py script structure.
-"""
+"""Server entry point for Wall-X policies."""
 
 import dataclasses
-from dataclasses import field
 import enum
 import logging
+import os
 import socket
 import sys
-import yaml
-from pathlib import Path
-from typing import List
-
+import traceback
 import tyro
 
-from wall_x.serving.policy.wall_x_policy import WallXPolicy
 from wall_x.serving.websocket_policy_server import WebsocketPolicyServer
+
+
+def get_wallx_policy(model_config, image_passing_mode, serialize_actions=True):
+    from wall_x.serving.policy.wall_x_policy import WallXPolicy
+    from wall_x.infer.infer_config import InferConfig
+
+    kwargs = {k: v for k, v in vars(model_config).items() if v is not None}
+    config = InferConfig(**kwargs)
+    return WallXPolicy(
+        config=config,
+        image_passing_mode=image_passing_mode,
+        serialize_actions=serialize_actions,
+    )
+
 
 logger = logging.getLogger(__name__)
 
@@ -29,36 +32,38 @@ logger = logging.getLogger(__name__)
 class EnvMode(enum.Enum):
     """Supported environments/datasets."""
 
+    X2ROBOT = "x2robot"
     LIBERO = "libero"
-    ALOHA = "aloha"
 
 
 @dataclasses.dataclass
-class ModelConfig:
+class ServerModelConfig:
     """Configuration for loading a Wall-X model."""
 
-    # Path to the pretrained model checkpoint
-    model_path: str
-    # Path to the action tokenizer
-    action_tokenizer_path: str
-    # Path to train config yaml
-    train_config_path: str
-    # Action dimension for the environment
-    action_dim: int = 7
-    # State dimension for the environment
-    state_dim: int = 8
-    # Prediction horizon (number of future actions to predict)
-    pred_horizon: int = 32
-    # Device to run model on
-    device: str = "cuda"
-    # Model dtype (bfloat16, float16, float32)
-    dtype: str = "bfloat16"
-    # Prediction mode (fast or slow)
-    predict_mode: str = "fast"
-    # Camera key for the environment
-    camera_key: List[str] = field(
-        default_factory=lambda: ["front_view", "left_wrist_view", "right_wrist_view"]
+    checkpoint_path: str | None = None
+    train_config_path: str | None = None
+    # robot_host: str = '0.0.0.0'
+    # robot_port: int = 33723
+    robot_type: str = "desktop"  # ["desktop", "turtle"]
+    robot_action_start_ratio: float = (
+        0.0  # proportion of action execution to start from
     )
+    robot_action_end_ratio: float = 0.8  # proportion of action execution to end at
+    robot_action_interpolate_multiplier: int = 70  # action interpolation multiplier
+    robot_use_joint_angle_control: bool = (
+        False  # use joint angle control (model must predict joints)
+    )
+    turtle_as_desktop: bool = (
+        False  # use turtle platform as desktop with fixed base/head/camera/height
+    )
+    action_horizon: int = 32  # specify the correct horizon for the model
+    action_dim: int | None = None
+    model_device: str = "cuda"
+    num_inference_timesteps: int = 10
+    save_video_dir: str = "/path/to/videos"
+
+    # Please specify explicitly if the checkpoint was not trained on the x2robot dataset.
+    norm_key: str | None = None
 
 
 @dataclasses.dataclass
@@ -66,16 +71,16 @@ class Args:
     """Arguments for the serve_wall_x script."""
 
     # Environment mode (used for default configurations)
-    env: EnvMode = EnvMode.LIBERO
+    env: EnvMode = EnvMode.X2ROBOT
 
     # Model configuration. If not provided, uses default config for the environment
-    model_config: ModelConfig | None = None
+    model_config: ServerModelConfig | None = None
 
     # Default text prompt to use if not provided in observation
     default_prompt: str | None = None
 
     # Port to serve the policy on
-    port: int = 8000
+    port: int = 43007
 
     # Host to bind the server to
     host: str = "0.0.0.0"
@@ -83,37 +88,46 @@ class Args:
     # Enable debug logging
     debug: bool = False
 
+    # Image passing mode
+    image_passing_mode: str = "base64"  # ["numpy", "base64"]
+
+    # Model type
+    model_type: str = "wallx"  # OSS supports qwen2.5 Wall-X only
+
+    # Serialize actions via robot_preprocessor (True for robot control, False for raw output)
+    serialize_actions: bool = True
+
+    # ── Dynamic batching ─────────────────────────────────────────
+    # Set max_batch_size to enable dynamic batching. None = single mode.
+    max_batch_size: int | None = None
+    max_wait_time_ms: float = 0
+    max_queue_size: int = 100
+    timeout_ms: float = 30000
+
+    # ── Engine flags ─────────────────────────────────────────────
+    enable_experimental_engine: bool = False
+    enable_cuda_graph: bool = False
+
 
 # Default model configurations for each environment
-DEFAULT_CONFIGS: dict[EnvMode, ModelConfig] = {
-    EnvMode.LIBERO: ModelConfig(
-        model_path="/path/to/model",
-        action_tokenizer_path="/path/to/action_tokenizer",
-        train_config_path="/path/to/train_config",
-        state_dim=8,
-        action_dim=7,
-        pred_horizon=32,
-        device="cuda",
-        dtype="bfloat16",
-        predict_mode="fast",
-        camera_key=["front_view", "left_wrist_view"],
-    ),
-    EnvMode.ALOHA: ModelConfig(
-        model_path="/path/to/model",
-        action_tokenizer_path="/path/to/action_tokenizer",
-        train_config_path="/path/to/train_config",
-        state_dim=14,
-        action_dim=14,
-        pred_horizon=32,
-        device="cuda",
-        dtype="bfloat16",
-        predict_mode="fast",
-        camera_key=["face_view", "left_wrist_view", "right_wrist_view"],
-    ),
+DEFAULT_CONFIGS: dict[EnvMode, ServerModelConfig] = {
+    EnvMode.X2ROBOT: ServerModelConfig(
+        checkpoint_path=None,
+        train_config_path=None,
+        robot_action_start_ratio=0.0,
+        robot_action_end_ratio=0.8,
+        robot_action_interpolate_multiplier=70,
+        robot_use_joint_angle_control=False,
+        turtle_as_desktop=False,
+        action_horizon=32,
+        action_dim=None,
+        model_device="cuda",
+        num_inference_timesteps=10,
+    )
 }
 
 
-def get_model_config(args: Args) -> ModelConfig:
+def get_model_config(args: Args) -> ServerModelConfig:
     """Get model configuration from args or defaults."""
     if args.model_config is not None:
         return args.model_config
@@ -128,37 +142,17 @@ def get_model_config(args: Args) -> ModelConfig:
     )
 
 
-def create_policy(args: Args) -> WallXPolicy:
-    """Create a Wall-X policy from the given arguments."""
-    config = get_model_config(args)
-    logger.info(f"Creating Wall-X policy with config: {config}")
-
-    # Validate paths
-    if not Path(config.model_path).exists():
-        logger.warning(f"Model path does not exist: {config.model_path}")
-
-    if not Path(config.action_tokenizer_path).exists():
-        logger.warning(
-            f"Action tokenizer path does not exist: {config.action_tokenizer_path}"
+def create_policy(args: Args):
+    """Create a policy from the given arguments."""
+    model_config = get_model_config(args)
+    if args.model_type != "wallx":
+        raise ValueError(
+            f"Unsupported model type: {args.model_type!r}. "
+            "The public package only supports model_type='wallx'."
         )
-
-    with open(config.train_config_path, "r") as f:
-        train_config = yaml.load(f, Loader=yaml.FullLoader)
-
-    policy = WallXPolicy(
-        model_path=config.model_path,
-        train_config=train_config,
-        action_tokenizer_path=config.action_tokenizer_path,
-        action_dim=config.action_dim,
-        agent_pos_dim=config.state_dim,
-        pred_horizon=config.pred_horizon,
-        device=config.device,
-        dtype=config.dtype,
-        predict_mode=config.predict_mode,
-        default_prompt=args.default_prompt,
-        camera_key=config.camera_key,
+    policy = get_wallx_policy(
+        model_config, args.image_passing_mode, args.serialize_actions
     )
-
     return policy
 
 
@@ -170,7 +164,17 @@ def main(args: Args) -> None:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    logger.info("Starting Wall-X model server")
+    # Set engine environment variables
+    if args.enable_experimental_engine:
+        os.environ["ENABLE_EXPERIMENTAL_INFERENCE_ENGINE"] = "true"
+        logger.info("ENABLE_EXPERIMENTAL_INFERENCE_ENGINE=true")
+
+    if args.enable_cuda_graph:
+        os.environ["ENABLE_CUDA_GRAPH"] = "true"
+        logger.info("ENABLE_CUDA_GRAPH=true")
+
+    logger.info("Starting model server")
+    logger.info(f"Model type: {args.model_type}")
     logger.info(f"Environment: {args.env.value}")
     logger.info(f"Port: {args.port}")
     logger.info(f"Host: {args.host}")
@@ -180,6 +184,7 @@ def main(args: Args) -> None:
         policy = create_policy(args)
     except Exception as e:
         logger.error(f"Failed to create policy: {e}")
+        logger.error(traceback.format_exc())
         sys.exit(1)
 
     # Get policy metadata
@@ -198,12 +203,23 @@ def main(args: Args) -> None:
     logger.info(f"Server will be available at: ws://{args.host}:{args.port}")
     logger.info(f"Health check endpoint: http://{args.host}:{args.port}/healthz")
 
+    batching_str = (
+        f"batch_size={args.max_batch_size}, wait={args.max_wait_time_ms}ms"
+        if args.max_batch_size
+        else "disabled"
+    )
+    logger.info(f"Batching: {batching_str}")
+
     # Create and start server
     server = WebsocketPolicyServer(
         policy=policy,
         host=args.host,
         port=args.port,
         metadata=policy_metadata,
+        max_batch_size=args.max_batch_size,
+        max_wait_time_ms=args.max_wait_time_ms,
+        max_queue_size=args.max_queue_size,
+        timeout_ms=args.timeout_ms,
     )
 
     logger.info("Starting server...")

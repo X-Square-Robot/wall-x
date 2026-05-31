@@ -1,85 +1,103 @@
-import torch
-from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl_act import Qwen2_5_VLMoEForAction
+#!/usr/bin/env python3
+"""Run one Wall-X VLA inference pass through the harrix adapter.
 
-model_path = "/path/to/model"
-model = Qwen2_5_VLMoEForAction.from_pretrained(model_path)
-model.eval()
+This is a lightweight smoke test for the inference path. It builds a synthetic
+LIBERO-style observation, loads the checkpoint through harrix, and prints the
+predicted action chunk shape.
+"""
 
-# Gen Fake data
-batch_size = 1
-seq_length = 50
+from __future__ import annotations
 
-torch.manual_seed(0)
-fake_input_ids = torch.randint(
-    0, len(model.processor.tokenizer), (batch_size, seq_length), dtype=torch.long
-)
-fake_attention_mask = torch.ones((batch_size, seq_length), dtype=torch.long)
-fake_moe_token_types = torch.zeros((batch_size, seq_length), dtype=torch.long)
-fake_position_ids = (
-    torch.arange(seq_length, dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
-)
-fake_proprioception = torch.randn((batch_size, 1, 20), dtype=torch.float32)
-fake_agent_pos_mask = torch.ones((batch_size, 1, 20), dtype=torch.float32)
-fake_dof_mask = torch.ones((batch_size, 32, 20), dtype=torch.float32)
-fake_dataset_names = ["x2_normal"]
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
 
 
-device = "cuda"
+def _ensure_local_harrix_on_path() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    harrix_python = repo_root / "third_party" / "harrix" / "python"
+    if harrix_python.is_dir():
+        sys.path.insert(0, str(harrix_python))
 
-model = model.to(device)
-model = model.bfloat16()
 
-fake_input_ids = fake_input_ids.to(device)
-fake_attention_mask = fake_attention_mask.to(device)
-fake_moe_token_types = fake_moe_token_types.to(device)
-fake_position_ids = fake_position_ids.to(device)
-fake_proprioception = fake_proprioception.to(device).bfloat16()
-fake_agent_pos_mask = fake_agent_pos_mask.to(device).bfloat16()
-fake_dof_mask = fake_dof_mask.to(device).bfloat16()
+def _build_fake_observation(seed: int, image_size: int) -> dict:
+    rng = np.random.default_rng(seed)
+    return {
+        "eef_pos": rng.normal(size=(3,)).astype(np.float32),
+        "eef_axisangle": rng.normal(size=(3,)).astype(np.float32),
+        "gripper": rng.normal(size=(1,)).astype(np.float32),
+        "face_view": rng.integers(0, 256, (image_size, image_size, 3), dtype=np.uint8),
+        "wrist_view": rng.integers(0, 256, (image_size, image_size, 3), dtype=np.uint8),
+    }
 
-try:
-    with torch.no_grad():
-        outputs = model(
-            input_ids=fake_input_ids,
-            attention_mask=fake_attention_mask,
-            moe_token_types=fake_moe_token_types,
-            position_ids=fake_position_ids,
-            proprioception=fake_proprioception,
-            agent_pos_mask=fake_agent_pos_mask,
-            dof_mask=fake_dof_mask,
-            dataset_names=fake_dataset_names,
-            mode="validate",
-        )
 
-    print("✅ Fake inference test successful!")
-    print(f"Output logits shape: {outputs.logits.shape}")
-    print(f"Output logits dtype: {outputs.logits.dtype}")
-    print(f"Output logits device: {outputs.logits.device}")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--checkpoint-path", required=True, help="Checkpoint directory."
+    )
+    parser.add_argument(
+        "--train-config-path",
+        default=None,
+        help="Optional training config path. Defaults to config.yml/config.yaml next to the checkpoint.",
+    )
+    parser.add_argument("--norm-key", default="libero_all")
+    parser.add_argument("--architecture", default="qwen2_5")
+    parser.add_argument("--action-mode", default="flow")
+    parser.add_argument(
+        "--cam-names",
+        nargs="+",
+        default=["face_view", "right_wrist_view"],
+        help="Camera names expected by the checkpoint.",
+    )
+    parser.add_argument("--action-horizon", type=int, default=None)
+    parser.add_argument("--instruction", default="pick up the object")
+    parser.add_argument("--image-size", type=int, default=128)
+    parser.add_argument("--seed", type=int, default=0)
+    return parser.parse_args()
 
-    # Check if output is reasonable
-    if outputs.logits.shape == (batch_size, seq_length, model.config.vocab_size):
-        print("✅ Output shape correct")
-    else:
-        print("❌ Output shape incorrect")
 
-    if not torch.isnan(outputs.logits).any():
-        print("✅ Output contains no NaN values")
-    else:
-        print("❌ Output contains NaN values")
+def main() -> int:
+    args = parse_args()
+    _ensure_local_harrix_on_path()
 
-    if not torch.isinf(outputs.logits).any():
-        print("✅ Output contains no infinity values")
-    else:
-        print("❌ Output contains infinity values")
+    from wall_x._vendor.harrix.adapters.registry import build_adapter
+    from wall_x._vendor.harrix.eval_config import (
+        EvalConfig,
+        LiberoEnvParams,
+        autofill_from_checkpoint,
+    )
 
-    print("Output logits statistics:")
-    print(f"  Min value: {outputs.logits.min().item():.4f}")
-    print(f"  Max value: {outputs.logits.max().item():.4f}")
-    print(f"  Mean: {outputs.logits.mean().item():.4f}")
-    print(f"  Standard deviation: {outputs.logits.std().item():.4f}")
+    import wall_x._vendor.harrix.adapters  # noqa: F401  register model adapters
 
-except Exception as e:
-    print(f"❌ Fake inference test failed: {e}")
-    import traceback
+    cfg = EvalConfig()
+    cfg.model.checkpoint_path = args.checkpoint_path
+    cfg.model.train_config_path = args.train_config_path
+    cfg.model.norm_key = args.norm_key
+    cfg.model.cam_names = list(args.cam_names)
+    cfg.model.action_horizon = args.action_horizon
+    cfg.model.architecture = args.architecture
+    cfg.model.action_mode = args.action_mode
+    cfg.env.libero = LiberoEnvParams(num_trials_per_task=1, task_indices=[0])
+    cfg = autofill_from_checkpoint(cfg)
 
-    traceback.print_exc()
+    adapter = build_adapter(cfg)
+    payload = {
+        "observation": _build_fake_observation(args.seed, args.image_size),
+        "instruction": args.instruction,
+        "noise": None,
+    }
+    actions = adapter.predict_batch([payload])
+    action = np.asarray(actions[0])
+
+    print("Fake inference succeeded.")
+    print(f"action shape: {action.shape}")
+    print(f"action dtype: {action.dtype}")
+    print(f"action min/max: {float(action.min()):.6f} / {float(action.max()):.6f}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,98 @@
+# Smoke config — refactor_2604 x2robot_v1 backend end-to-end check.
+# Goal: 1 epoch with libero data; v1 backend via Path C (inline dataset_path
+# under data: — load_x2r_data_config builds X2RDataConfig from typed fields).
+# train_fsdp.py validates the typed schema.
+model_type: qwen2_5
+
+task:
+  dof_config:
+    follow_left_ee_cartesian_pos: 3
+    follow_left_ee_rotation: 3
+    follow_left_gripper: 1
+    follow_right_ee_cartesian_pos: 3
+    follow_right_ee_rotation: 3
+    follow_right_gripper: 1
+  agent_pos_config:
+    follow_left_ee_cartesian_pos: 3
+    follow_left_ee_rotation: 3
+    follow_left_gripper: 1
+    follow_right_ee_cartesian_pos: 3
+    follow_right_ee_rotation: 3
+    follow_right_gripper: 1
+  action_horizon: 32
+  action_horizon_flow: 32
+  use_state_string_representation: false
+
+model:
+  backbone: qwen2_5
+  config_path: /path/to/wall-oss-0.5/config.json
+  processor_path: /path/to/Qwen2.5-VL-3B-Instruct
+  pretrained_path: /path/to/Qwen2.5-VL-3B-Instruct
+  attn_deterministic: true
+  use_ema: false
+  flow_loss_weight: 1.0
+
+hyperparams:
+  num_epoch: 1
+  batch_size_per_gpu: 1
+  gradient_accumulation_steps: 1
+  seed: 10233
+  optimizer:
+    optimizer_type: adamw
+    learning_rate: 0.00006
+    max_grad_norm: 1.0
+    enable_grad_clip: true
+    betas: [0.9, 0.999]
+    weight_decay: 1.0e-8
+    eps: 1.0e-8
+  scheduler:
+    scheduler_type: cosine
+    num_warmup_steps: 10
+    num_training_steps: 100
+    min_lr: 1.0e-5
+
+distributed:
+  use_fsdp: true
+  use_mixed_precision: true
+  bf16: true
+
+data:
+  dataset_type: x2robot_v1
+  # Path C — inline data sources under data:. ``dataset_config_path``
+  # left None; legacy top-level ``dataset_path`` form still works for
+  # backward compatibility (build_x2r_data_config reads either).
+  dataset_path:
+    # libero_object_20250820 has the full v1 trajectory layout
+    # (faceImg.mp4 + rightImg.mp4 + trajectory_<N>.json + trajectory_data.json
+    # + trajectory_data_processed.json). libero_gop30 is missing the
+    # trajectory_data*.json files so the v1 dataset worker pool would hang.
+    - path: /path/to/libero_object
+      cam_mapping:
+        faceImg: face_view
+        rightImg: right_wrist_view
+  multimodal_data_ratio: 0.0
+  resolution:
+    face_view: 256
+    left_wrist_view: 256
+    right_wrist_view: 256
+    multi_modal: 256
+  # v1-specific
+  buffer_size: 2000
+
+logging:
+  log_name: x2robot_v1_smoke
+  log_project: wallx_smoke
+  log_entity: x2robot
+  use_wandb: false
+  log_interval: 1
+  save_interval: 1000000
+  val_interval: 1000000
+  epoch_save_interval: 1
+
+checkpoint:
+  save_path: ./ckpt/smoke/x2robot_v1
+  validate_first: false
+
+debug:
+  profile: false
+  nvtx: false

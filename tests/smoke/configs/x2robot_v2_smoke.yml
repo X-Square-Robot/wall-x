@@ -1,0 +1,79 @@
+# Smoke config — refactor_2604 x2robot_v2 backend end-to-end check.
+# Goal: 1 epoch with the libero v2 origin-aug sources YAML; exercises
+#   build_data → backends/x2robot_v2/build → internal_dataset_backend_v2.X2RobotDataset.
+# Val runs once at epoch end (val_interval huge → mid-epoch val skipped).
+model_type: qwen2_5
+
+task:
+  # Keys MUST match the v2 yaml's processors.action.{predict_action_keys, obs_action_keys}
+  # below: predict = master_right_*, obs = follow_right_*.
+  dof_config:
+    master_right_ee_cartesian_pos: 3
+    master_right_ee_rotation: 3
+    master_right_gripper: 1
+  agent_pos_config:
+    follow_right_ee_cartesian_pos: 3
+    follow_right_ee_rotation: 3
+    follow_right_gripper: 1
+  action_horizon: 10                 # match v2 yaml's window.action_horizon
+  action_horizon_flow: 10
+  use_state_string_representation: false
+
+model:
+  backbone: qwen2_5
+  config_path: /path/to/wall-oss-0.5/config.json
+  processor_path: /path/to/Qwen2.5-VL-3B-Instruct
+  pretrained_path: /path/to/Qwen2.5-VL-3B-Instruct
+  attn_deterministic: true
+  use_ema: false
+  flow_loss_weight: 1.0
+
+hyperparams:
+  num_epoch: 1
+  batch_size_per_gpu: 1
+  gradient_accumulation_steps: 1
+  seed: 10233
+  optimizer:
+    optimizer_type: adamw
+    learning_rate: 0.0001
+    max_grad_norm: 1.0
+    enable_grad_clip: true
+    betas: [0.9, 0.95]
+    weight_decay: 1.0e-8
+    eps: 1.0e-8
+  scheduler:
+    scheduler_type: cosine
+    num_warmup_steps: 10
+    num_training_steps: 100
+    min_lr: 1.0e-5
+
+distributed:
+  use_fsdp: true
+  use_mixed_precision: true
+  bf16: true
+
+data:
+  dataset_type: x2robot_v2
+  # libero_v2_origin (not _aug) targets Qwen2.5-VL-3B-Instruct, matching the
+  # model.processor_path above. The _aug variant targets Qwen3.5-9B-Base and
+  # its vision encoder shape mismatches Qwen2.5-VL → "shape [-1,3,2,14,14]
+  # invalid for input of size 786432" at first forward.
+  dataset_config_path: /path/to/libero_v2_origin.yml
+
+logging:
+  log_name: x2robot_v2_smoke
+  log_project: wallx_smoke
+  log_entity: x2robot
+  use_wandb: false
+  log_interval: 1
+  save_interval: 1000000
+  val_interval: 1000000
+  epoch_save_interval: 1
+
+checkpoint:
+  save_path: ./ckpt/smoke/x2robot_v2
+  validate_first: false
+
+debug:
+  profile: false
+  nvtx: false

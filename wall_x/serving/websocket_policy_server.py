@@ -2,8 +2,7 @@ import asyncio
 import http
 import logging
 import time
-import traceback
-from typing import Any, Dict, Optional
+from typing import Dict, Any, List
 
 try:
     import msgpack
@@ -29,6 +28,10 @@ class BasePolicy:
         """Infer actions from observations."""
         raise NotImplementedError
 
+    def infer_batch(self, obs_list: List[Dict]) -> List[Dict]:
+        """Batch inference. Default implementation calls infer() per sample."""
+        return [self.infer(obs) for obs in obs_list]
+
     def reset(self) -> None:
         """Reset the policy to its initial state."""
         pass
@@ -45,8 +48,11 @@ class WebsocketPolicyServer:
     Implements a websocket server that:
     1. Sends policy metadata on connection
     2. Receives observations
-    3. Returns predicted actions
+    3. Returns predicted actions (single or batched)
     4. Tracks timing information
+
+    When batching parameters are provided, dynamic batching is enabled:
+    requests from multiple clients are queued and processed in batches.
     """
 
     def __init__(
@@ -54,30 +60,66 @@ class WebsocketPolicyServer:
         policy: BasePolicy,
         host: str = "0.0.0.0",
         port: int = 8000,
-        metadata: Optional[Dict] = None,
+        metadata: Dict | None = None,
+        # Dynamic batching parameters (None = disabled)
+        max_batch_size: int | None = None,
+        max_wait_time_ms: float | None = None,
+        max_queue_size: int = 100,
+        timeout_ms: float = 30000,
     ) -> None:
         self._policy = policy
         self._host = host
         self._port = port
         self._metadata = metadata or {}
+
+        # Dynamic batching
+        self._scheduler = None
+        if max_batch_size is not None:
+            from .scheduler import RequestScheduler
+
+            self._scheduler = RequestScheduler(
+                policy=policy,
+                max_batch_size=max_batch_size,
+                max_wait_time_ms=(
+                    max_wait_time_ms if max_wait_time_ms is not None else 0
+                ),
+                max_queue_size=max_queue_size,
+                timeout_ms=timeout_ms,
+            )
+
         logging.getLogger("websockets.server").setLevel(logging.INFO)
+
+    @property
+    def batching_enabled(self) -> bool:
+        return self._scheduler is not None
 
     def serve_forever(self) -> None:
         asyncio.run(self.run())
 
     async def run(self):
-        async with _server.serve(
-            self._handler,
-            self._host,
-            self._port,
-            compression=None,
-            max_size=None,
-            ping_interval=None,  # Disable automatic ping for long-running inference
-            ping_timeout=None,  # Disable ping timeout
-            process_request=_health_check,
-        ) as server:
-            logger.info(f"Server started on {self._host}:{self._port}")
-            await server.serve_forever()
+        # Start the scheduler if batching is enabled
+        if self._scheduler is not None:
+            await self._scheduler.start()
+
+        try:
+            async with _server.serve(
+                self._handler,
+                self._host,
+                self._port,
+                compression=None,
+                max_size=None,
+                ping_interval=None,
+                ping_timeout=None,
+                process_request=_health_check,
+            ) as server:
+                mode_str = "batched" if self.batching_enabled else "single"
+                logger.info(
+                    f"Server started on {self._host}:{self._port} (mode={mode_str})"
+                )
+                await server.serve_forever()
+        finally:
+            if self._scheduler is not None:
+                await self._scheduler.stop()
 
     async def _handler(self, websocket: _server.ServerConnection):
         logger.info(f"Connection from {websocket.remote_address} opened")
@@ -99,7 +141,14 @@ class WebsocketPolicyServer:
                 obs = msgpack.unpackb(await websocket.recv())
 
                 infer_time = time.monotonic()
-                action = self._policy.infer(obs)
+
+                if self._scheduler is not None:
+                    # Dynamic batching path
+                    action = await self._scheduler.add_request(obs)
+                else:
+                    # Single inference path
+                    action = await asyncio.to_thread(self._policy.infer, obs)
+
                 infer_time = time.monotonic() - infer_time
 
                 action["server_timing"] = {
@@ -115,18 +164,19 @@ class WebsocketPolicyServer:
                 logger.info(f"Connection from {websocket.remote_address} closed")
                 break
             except Exception as e:
-                logger.error(f"Error handling request: {e}")
-                await websocket.send(traceback.format_exc())
+                logger.error(f"Error handling request: {e}", exc_info=True)
                 await websocket.close(
                     code=websockets.frames.CloseCode.INTERNAL_ERROR,
-                    reason="Internal server error. Traceback included in previous frame.",
+                    reason="Internal server error.",
                 )
                 raise
 
 
 def _health_check(
     connection: _server.ServerConnection, request: _server.Request
-) -> Optional[_server.Response]:
+) -> _server.Response | None:
     if request.path == "/healthz":
+        return connection.respond(http.HTTPStatus.OK, "OK\n")
+    if request.path == "/v2/health/ready":
         return connection.respond(http.HTTPStatus.OK, "OK\n")
     return None

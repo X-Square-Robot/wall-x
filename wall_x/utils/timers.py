@@ -6,7 +6,10 @@ from typing import List
 import torch
 from functools import wraps
 from contextlib import nullcontext
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 ENABLE_PERFORMANCE_TIMING = (
     os.environ.get("ENABLE_PERFORMANCE_TIMING", "True").lower() == "true"
@@ -32,23 +35,14 @@ class ScopeTimerContext:
             torch.cuda.synchronize()
         end_time = time.perf_counter()
         cost_ms = (end_time - self.start_time) * 1e3
-        print(f"\033[92m{self.msg} took {cost_ms:.3f} ms to execute\033[0m")
+        logger.info("%s took %.3f ms to execute", self.msg, cost_ms)
 
 
 ScopeTimer = ScopeTimerContext if ENABLE_PERFORMANCE_TIMING else nullcontext
 
 
 def timer(func, msg=None):
-    """
-    Decorator to measure function execution time.
-
-    Args:
-        func: Function to be timed
-
-    Returns:
-        Wrapped function with timing functionality
-    """
-
+    """Decorator to measure function execution time."""
     if msg is None:
         msg = func.__name__
     else:
@@ -58,44 +52,36 @@ def timer(func, msg=None):
     def wrapper(*args, **kwargs):
         with ScopeTimer(msg):
             result = func(*args, **kwargs)
-
         return result
 
     return wrapper
 
 
-# Helper functions to check for distributed environment
 def _is_distributed():
-    """Checks if the current environment is set up for distributed training."""
     return torch.distributed.is_available() and torch.distributed.is_initialized()
 
 
 def _get_world_size():
-    """Safely retrieves the world size (number of processes)."""
     if _is_distributed():
         return torch.distributed.get_world_size()
     return 1
 
 
 def _get_rank():
-    """Safely retrieves the rank of the current process."""
     if _is_distributed():
         return torch.distributed.get_rank()
     return 0
 
 
 def _barrier(group=None):
-    """Safely executes a distributed barrier to synchronize processes."""
     if _is_distributed():
         torch.distributed.barrier(group=group)
 
 
-# Dynamically set the all_gather function
 if torch.distributed.is_available():
     try:
         dist_all_gather_func = torch.distributed.all_gather_into_tensor
     except AttributeError:
-        # Fallback to standard all_gather if all_gather_into_tensor is missing
         dist_all_gather_func = torch.distributed.all_gather
 else:
     dist_all_gather_func = None
@@ -109,51 +95,35 @@ class TimerBase(ABC):
 
     @abstractmethod
     def start(self, barrier=False):
-        """Start the timer.
-
-        Args:
-            barrier (bool, optional): Synchronizes ranks before starting. Defaults to False.
-        """
+        """Start the timer, optionally syncing all ranks with a barrier first."""
         pass
 
     @abstractmethod
     def stop(self, barrier=False):
-        """Stop the timer.
-
-        Args:
-            barrier (bool, optional): Synchronizes ranks before stopping. Defaults to False.
-        """
+        """Stop the timer, optionally syncing all ranks with a barrier first."""
         pass
 
     @abstractmethod
     def reset(self):
-        """Reset timer."""
+        """Reset accumulated elapsed time to zero."""
         pass
 
     @abstractmethod
     def elapsed(self, reset=True, barrier=False):
-        """Calculates the elapsed time and restarts timer.
-
-        Args:
-            reset (bool, optional): Resets timer before restarting. Defaults to True.
-            barrier (bool, optional): Synchronizes ranks before stopping. Defaults to False.
-
-        Returns:
-            float: Elapsed time.
-        """
+        """Return accumulated elapsed time in seconds; reset if reset=True."""
         pass
 
 
 class DummyTimer(TimerBase):
-    """Dummy Timer."""
+    """Dummy Timer — no-op placeholder used when log level exceeds threshold."""
 
     def __init__(self):
         super().__init__("dummy timer")
 
-    def start(self, barrier=False, nvtx_push=False):
+    def start(self, barrier=False, nvtx_push=False, sync=False, **kwargs):
         return
 
-    def stop(self, barrier=False, nvtx_pop=False):
+    def stop(self, barrier=False, sync=False, **kwargs):
         return
 
     def reset(self):
@@ -166,9 +136,6 @@ class DummyTimer(TimerBase):
         )
 
     def active_time(self):
-        """Returns the cumulative duration the timer has been active.
-        Note: Not supported for DummyTimer.
-        """
         raise Exception(
             "active timer should not be used to calculate elapsed time, "
             "check if timer's log_level <= self._log_level."
@@ -188,34 +155,18 @@ class Timer(TimerBase):
     """
 
     def __init__(self, name):
-        """Initialize Timer.
-
-        Args:
-            name (str): Name of the timer.
-        """
         super().__init__(name)
         self._elapsed = 0.0
         self._active_time = 0.0
         self._started = False
-        # Note that None will default to the global process group
         self._barrier_group = None
         self._start_time = time.time()
         self.nvtx = False
 
     def set_barrier_group(self, barrier_group):
-        """Sets barrier group.
-
-        Args:
-            barrier_group (ProcessGroup): Torch ProcessGroup for barrier.
-        """
         self._barrier_group = barrier_group
 
     def start(self, barrier=False, nvtx_push=False, sync=False):
-        """Start the timer.
-
-        Args:
-            barrier (bool, optional): Synchronizes ranks before starting. Defaults to False.
-        """
         assert not self._started, "timer has already been started"
         if barrier:
             _barrier(group=self._barrier_group)
@@ -228,11 +179,6 @@ class Timer(TimerBase):
             self.nvtx = True
 
     def stop(self, barrier=False, sync=False):
-        """Stop the timer.
-
-        Args:
-            barrier (bool, optional): Synchronizes ranks before stopping. Defaults to False.
-        """
         if self.nvtx:
             nvtx.range_pop()
         assert self._started, "timer is not started"
@@ -246,37 +192,21 @@ class Timer(TimerBase):
         self._started = False
 
     def reset(self):
-        """Reset timer."""
-        # Don't reset _active_time
         self._elapsed = 0.0
         self._started = False
 
     def elapsed(self, reset=True, barrier=False):
-        """Calculates the elapsed time and restarts timer.
-
-        Args:
-            reset (bool, optional): Resets timer before restarting. Defaults to True.
-            barrier (bool, optional): Synchronizes ranks before stopping. Defaults to False.
-
-        Returns:
-            float: Elapsed time.
-        """
         _started = self._started
-        # If the timing in progress, end it first.
         if self._started:
             self.stop(barrier=barrier)
-        # Get the elapsed time.
         _elapsed = self._elapsed
-        # Reset the elapsed time
         if reset:
             self.reset()
-        # If timing was in progress, set it back.
         if _started:
             self.start(barrier=barrier)
         return _elapsed
 
     def active_time(self):
-        """Calculates the cumulative duration for which the timer has been active"""
         return self._active_time
 
 
@@ -284,13 +214,6 @@ class Timers:
     """Class for a group of Timers."""
 
     def __init__(self, log_level, log_option):
-        """Initialize group of timers.
-
-        Args:
-            log_level (int): Log level to control what timers are enabled.
-            log_option (str): Setting for logging statistics over ranks for all the timers.
-                              Allowed: ['max', 'minmax', 'all'].
-        """
         self._log_level = log_level
         allowed_log_options = set(["max", "minmax", "all"])
         assert (
@@ -305,9 +228,6 @@ class Timers:
         self._max_log_level = 2
 
     def __call__(self, name, log_level=None):
-        """Call timer with name and log level."""
-        # If the timer has already been set, then check if the log-level
-        # is provided, it matches the one that the timer was created with.
         if name in self._timers:
             if log_level is not None:
                 assert log_level == self._log_levels[name], (
@@ -317,8 +237,6 @@ class Timers:
                     )
                 )
             return self._timers[name]
-        # If timer does not exist and no log level is provided,
-        # set it to the max log level which is 2.
         if log_level is None:
             log_level = self._max_log_level
         assert (
@@ -326,38 +244,19 @@ class Timers:
         ), "log level {} is larger than max supported log level {}".format(
             log_level, self._max_log_level
         )
-        # Now if the input log level is larger than the one set for
-        # the timers class, just ignore it and return a dummy timer.
         if log_level > self._log_level:
             return self._dummy_timer
-        # Otherwise, initalize the timer and set the level.
         self._timers[name] = Timer(name)
         self._log_levels[name] = log_level
         return self._timers[name]
 
     def _get_elapsed_time_all_ranks(self, names, reset, barrier):
-        """Returns elapsed times of timers in names.
-
-        For single-node/single-GPU cases, directly returns the time for the current rank.
-        For distributed cases, maintains the existing all_gather logic.
-
-        Args:
-            names (List[str]): list of timer names
-            reset (bool): reset the timer after recording the elapsed time
-            barrier (bool): if set, do a global barrier before time measurements
-
-        Returns:
-            torch.tensor: Tensor of size [world_size, len(names)] with times in float.
-        """
-
-        # First make sure all the callers are in sync.
         if barrier:
             _barrier()
 
         world_size = _get_world_size()
         rank = _get_rank()
 
-        # Create device tensor
         if torch.cuda.is_available():
             device = torch.cuda.current_device()
         else:
@@ -367,33 +266,26 @@ class Timers:
             (world_size, len(names)), dtype=torch.float, device=device
         )
 
-        # Fill timing data for the current rank
         for i, name in enumerate(names):
             if name in self._timers:
                 rank_name_to_time[rank, i] = self._timers[name].elapsed(reset=reset)
 
-        # Return directly for single-node; perform all_gather for distributed setup
         if world_size > 1 and _is_distributed() and dist_all_gather_func is not None:
             try:
                 dist_all_gather_func(
                     rank_name_to_time.view(-1), rank_name_to_time[rank, :].view(-1)
                 )
             except Exception as e:
-                # If all_gather fails, print a warning and proceed with single rank timing
-                print(f"Warning: all_gather failed: {e}. Using single rank timing.")
+                logger.warning("all_gather failed: %s. Using single rank timing.", e)
 
         return rank_name_to_time
 
     def _get_global_min_max_time(self, names, reset, barrier, normalizer):
-        """Report only min and max times across all ranks."""
-
         rank_name_to_time = self._get_elapsed_time_all_ranks(names, reset, barrier)
         name_to_min_max_time = {}
         for i, name in enumerate(names):
             rank_to_time = rank_name_to_time[:, i]
-            # filter out the ones we did not have any timings for
             rank_to_time = rank_to_time[rank_to_time > 0.0]
-            # If the timer exists:
             if rank_to_time.numel() > 0:
                 name_to_min_max_time[name] = (
                     rank_to_time.min().item() / normalizer,
@@ -404,7 +296,6 @@ class Timers:
     def _get_global_min_max_time_string(
         self, names, reset, barrier, normalizer, max_only
     ):
-        """Report strings for max/minmax times across all ranks."""
         name_to_min_max_time = self._get_global_min_max_time(
             names, reset, barrier, normalizer
         )
@@ -413,17 +304,13 @@ class Timers:
 
         world_size = _get_world_size()
         if world_size == 1:
-            # Simplified output for single-node setup
             output_string = "time (ms):"
             for name in name_to_min_max_time:
-                _, max_time = name_to_min_max_time[
-                    name
-                ]  # min and max are identical for a single rank
+                _, max_time = name_to_min_max_time[name]
                 output_string += "\n    {}: {:.2f}".format(
                     (name + " ").ljust(48, "."), max_time
                 )
         else:
-            # Maintain original output format for multi-node setup
             if max_only:
                 output_string = "max time across ranks (ms):"
             else:
@@ -441,7 +328,6 @@ class Timers:
         return output_string
 
     def _get_all_ranks_time_string(self, names, reset, barrier, normalizer):
-        """Report times across all ranks."""
         rank_name_to_time = self._get_elapsed_time_all_ranks(names, reset, barrier)
         world_size = _get_world_size()
 
@@ -474,32 +360,20 @@ class Timers:
         reset: bool = True,
         barrier: bool = False,
     ):
-        """Returns the output string with logged timer values according to configured options.
+        """Return a formatted timing string for the given timer names.
 
         Args:
-            names (List[str]): Names of the timers to log. If None, all registered timers are
-                               fetched. Defaults to None.
-            normalizer (float, optional): Normalizes the timer values by the factor.
-                                          Defaults to 1.0.
-            reset (bool, optional): Whether to reset timer values after logging. Defaults to True.
-            barrier (bool, optional): Whether to do a global barrier before time measurments.
-                                      Defaults to False.
-
-        Raises:
-            Exception: Raises if log option is invalid.
-
-        Returns:
-            str: Formatted string with the timer values.
+            names: Timers to include; defaults to all registered timers.
+            normalizer: Divide raw seconds by this value (e.g. 1000 for ms output).
+            reset: Reset each timer after reading its elapsed time.
+            barrier: Synchronize across ranks before gathering times.
         """
-
-        if names is None:  # get all registered timers
+        if names is None:
             names = list(self._timers.keys())
 
         assert normalizer > 0.0
         if self._log_option in ["max", "minmax"]:
-            max_only = False
-            if self._log_option == "max":
-                max_only = True
+            max_only = self._log_option == "max"
             output_string = self._get_global_min_max_time_string(
                 names, reset, barrier, normalizer / 1000.0, max_only
             )
@@ -519,30 +393,23 @@ class Timers:
         reset: bool = True,
         barrier: bool = False,
     ):
-        """logs the timers passed in names to stdout. Example usage is to log average per step
-           value for timer 'foo', this function can be called with normalizer factor set to logging
-           interval.
+        """Print timing results for the given names to stdout on one rank.
 
         Args:
-            names (List[str]): Names of the timers to log.
-            rank (int, optional): logs the timers to a specific rank. If set to None, logs to the
-                                  last rank. Defaults to None.
-            normalizer (float, optional): Normalizes the timer values by the factor.
-                                          Defaults to 1.0.
-            reset (bool, optional): Whether to reset timer values after logging. Defaults to True.
-            barrier (bool, optional): Whether to do a global barrier before time measurments.
-                                      Defaults to False.
+            names: Timer names to log.
+            rank: Rank that prints; defaults to the last rank (world_size - 1).
+            normalizer: Divide raw seconds by this value before printing.
+            reset: Reset each timer after reading.
+            barrier: Synchronize across ranks first.
         """
-
         output_string = self.get_all_timers_string(names, normalizer, reset, barrier)
-        # If no input rank is provided, log on last rank.
         world_size = _get_world_size()
         current_rank = _get_rank()
 
         if rank is None:
             rank = world_size - 1
         if rank == current_rank and output_string is not None:
-            print(output_string, flush=True)
+            logger.info("%s", output_string)
 
     def write(
         self,
@@ -553,22 +420,16 @@ class Timers:
         reset: bool = True,
         barrier: bool = False,
     ):
-        """Write timers to a tensorboard writer.
-        Note that we only report maximum time across ranks to tensorboard.
+        """Write per-timer max times as TensorBoard scalars.
 
         Args:
-            names (List[str]): Names of the timers to log.
-            writer (SummaryWriter): Tensorboard SummaryWriter object
-            iteration (int): Current iteration.
-            normalizer (float, optional): Normalizes the timer values by the factor.
-                                          Defaults to 1.0.
-            reset (bool, optional): Whether to reset timer values after logging. Defaults to True.
-            barrier (bool, optional): Whether to do a global barrier before time measurments.
-                                      Defaults to False.
+            names: Timer names to write.
+            writer: TensorBoard SummaryWriter instance.
+            iteration: Global step value for the scalar.
+            normalizer: Divide raw seconds by this value.
+            reset: Reset each timer after reading.
+            barrier: Synchronize across ranks first.
         """
-        # currently when using add_scalars,
-        # torch.utils.add_scalars makes each timer its own run, which
-        # polutes the runs list, so we just add each as a scalar
         assert normalizer > 0.0
         name_to_min_max_time = self._get_global_min_max_time(
             names, reset, barrier, normalizer

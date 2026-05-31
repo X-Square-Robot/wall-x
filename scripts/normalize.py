@@ -1,4 +1,6 @@
-# This file is copied from openpi
+# Adapted from Physical-Intelligence/openpi:
+# https://github.com/Physical-Intelligence/openpi/blob/650c5b0283a49c42784fb5055a0507da2c6d347d/src/openpi/shared/normalize.py
+# Upstream license: Apache-2.0.
 import json
 import pathlib
 

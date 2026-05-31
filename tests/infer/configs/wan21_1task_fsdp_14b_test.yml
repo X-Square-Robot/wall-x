@@ -1,0 +1,237 @@
+# @package _global_
+model_type: "wan"
+
+# ============================================================================
+# task: shared model/data task definition (TaskConfig)
+# ============================================================================
+task:
+  dof_config:
+    follow_left_ee_cartesian_pos: 3
+    follow_left_ee_rotation: 3
+    follow_left_gripper: 1
+    follow_right_ee_cartesian_pos: 3
+    follow_right_ee_rotation: 3
+    follow_right_gripper: 1
+  agent_pos_config:
+    follow_left_ee_cartesian_pos: 3
+    follow_left_ee_rotation: 3
+    follow_left_gripper: 1
+    follow_right_ee_cartesian_pos: 3
+    follow_right_ee_rotation: 3
+    follow_right_gripper: 1
+  action_horizon: 32
+
+# ============================================================================
+# model: VGA model config (VGAModelConfig, routed by model_type=wan)
+# ============================================================================
+model:
+  # --- model paths ---
+  model_paths: null
+  model_id_with_origin_paths:
+    - "Wan-AI/Wan2.1-I2V-14B-480P:diffusion_pytorch_model*.safetensors"
+    - "Wan-AI/Wan2.1-I2V-14B-480P:models_t5_umt5-xxl-enc-bf16.pth"
+    - "Wan-AI/Wan2.1-I2V-14B-480P:Wan2.1_VAE.pth"
+    - "Wan-AI/Wan2.1-I2V-14B-480P:models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth"
+  trainable_models:
+    - dit
+    - action_transformer
+
+  # --- video ---
+  fixed_resolution: true
+  height: 176
+  width: 224
+  extra_inputs:
+    - input_image
+
+  # --- action ---
+  enable_action: true
+  action_dim: 14
+  action_transformer_dim: 1536
+  action_loss_weight: 5.0
+  video_loss_weight: 1.0
+  video_loss_weight_start_step: 15000
+  action_video_block_mapping: "1,3,5,7,9,11,13,15,17,19,21,23,25,27,29"
+  ignore_video_loss: false
+  constraint_loss_weight: 0.0
+  dct_loss_weight: 5.0
+  use_custom_lr_groups: false
+  local_alignment_pe: true
+  state_attn: true
+
+  # --- Flow matching ---
+  separate_flow_matching: true
+  action_batch_size: 4
+  action_pred_type: "v_pred"
+  second_head_loss_weight: 0.0
+
+  # --- depth prediction ---
+
+  # --- View attention ---
+  only_train_view_attention: false
+  multi_views: true
+  num_views: 3
+
+  # --- inference ---
+  inference: false
+
+  # --- prompts ---
+  qwen25_prompt_template: null
+  prompt_template: "{instruction}"
+  text_feature_cache_path: "/path/to/text_feature_cache.pt"
+
+  # --- Qwen2.5 ---
+  use_qwen25: false
+  qwen25_path: null
+  qwen_proj_out_dim: 4096
+  print_qwen_output: false
+  qwen25_cascade_t5: false
+
+  # --- data sampling ---
+  event_level_weighted_sampling: false
+
+  # --- validation ---
+  validation:
+    val_every_n_steps: 3000
+    num_val_samples: 2
+    num_frames: 17
+    height: 176
+    width: 224
+    num_inference_steps: 50
+    cfg_scale: 1.0
+    seed: 0
+    openloop:
+      episodes_path: "/path/to/episodes"
+      episode_index: 0
+
+  # --- policy ---
+  policy:
+    action_len: 32
+
+# ============================================================================
+# data: data loading config
+# ============================================================================
+data:
+  normalizer_config:
+    customized_action_statistic_dof: /path/to/dataset_type2action_stats_merged.json
+    min_key: "q001"
+    delta_key: "delta_001"
+  dataset_config_path: null
+
+  resolution:
+    face_view: 224
+    left_wrist_view: 224
+    right_wrist_view: 224
+    move1_view: 224
+    move2_view: 224
+    top_view: 224
+    wall_view: 224
+    multi_modal: 224
+    side_view: 224
+    global_view: 224
+    camera_left_wrist: 224
+    camera_right_wrist: 224
+    left_side_view: 224
+    third_view: 224
+    right_side_view: 224
+
+  cache_dir: '/path/to/dataset_cache'
+  train_test_split: 0.95
+  rgb_keys: ['face_view', 'left_wrist_view', 'right_wrist_view']
+  lowdim_keys: ['agent_pos']
+  tactile_keys: []
+
+  action_history_length: 1
+  image_horizon: 16
+  image_history_length: 1
+
+  task_balance_alpha: 0.3
+  task_balance_warmup_epochs: 5
+  task_balance_tau_start: 1.0
+  task_balance_tau_end: 6.0
+  log_weighted_sampling: false
+
+
+  buffer_size: 5000
+  preload_size: 16
+  future_image_indices: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32]
+  future_image_length: 16
+  future_image_interval: 2
+  trim_stationary: false
+
+  instruction_path: ['/open_data/subtask_instruction_for_x2/{robot_id}/{topic_id}/instruction.json', '{topic_path}/instruction.json']
+  instruction_key: ["instruction", "subtask_generation", "distribute"]
+
+  # scene-change filtering
+  filter_scene_change: true
+  scene_change_dims:
+    velocity_decomposed: [1, 2]
+    head_actions: [0, 1]
+    torso: [0, 1, 2, 3]
+
+  enable_cfg_ratio: false
+  cfg_min_ratio: 0.2
+  cfg_low_frame_threshold: 121
+  cfg_upper_frame_limit: 300
+  cfg_max_ratio: 0.8
+  cfg_general_fixed_ratio: 0.1
+
+# ============================================================================
+# hyperparams: training hyperparameters (TrainHyperParams)
+# ============================================================================
+hyperparams:
+  num_epoch: 200
+  batch_size_per_gpu: 1
+  gradient_accumulation_steps: 1
+  optimizer:
+    optimizer_type: "adamw"
+    learning_rate: 1.0e-4
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+    max_grad_norm: 1.0
+  scheduler:
+    scheduler_type: "constant"
+
+# ============================================================================
+# distributed: distributed training (DistributedConfig)
+# ============================================================================
+distributed:
+  use_fsdp: true
+  fsdp_save_policy: "full"
+  use_fsdp2: false
+  bf16: true
+  use_mixed_precision: false
+  use_amp: false
+  use_gradient_checkpointing: true
+  find_unused_parameters: false
+
+# ============================================================================
+# logging: logging and monitoring (LoggingConfig)
+# ============================================================================
+logging:
+  log_project: "vga2"
+  log_name: "wan21_1task_fsdp_14B_test"
+  log_entity: "czrz-x-square-robot"
+  use_wandb: false
+  wandb_offline: false
+  save_interval: 1000
+  val_interval: 1000000
+  epoch_save_interval: 1
+
+# ============================================================================
+# checkpoint: checkpoint config (CheckpointConfig)
+# ============================================================================
+checkpoint:
+  save_path: "/path/to/training_output"
+
+# ============================================================================
+# debug: debug config (DebugConfig)
+# ============================================================================
+debug:
+  show_time_details: false
+
+# ============================================================================
+# dataset_path: dataset roots (consumed by the data loader)
+# ============================================================================
+dataset_path:
+- path: /path/to/dataset_a
+- path: /path/to/dataset_b

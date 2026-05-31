@@ -1,2 +1,2 @@
 [tool.ruff]
-per-file-ignores = { "__init__.py" = ["F401", "E402"] }
+per-file-ignores = { "__init__.py" = ["F401", "E402"], "scripts/compute_norm_stats.py" = ["E402"] }
