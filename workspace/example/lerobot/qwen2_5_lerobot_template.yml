@@ -1,0 +1,93 @@
+# Public Wall-X Qwen2.5 + LeRobot training template.
+#
+# Replace all /path/to/... values before launching training.
+model_type: qwen2_5
+
+task:
+  dof_config:
+    master_right_ee_cartesian_pos: 3
+    master_right_ee_rotation: 3
+    master_right_gripper: 1
+  agent_pos_config:
+    follow_right_ee_cartesian_pos: 3
+    follow_right_ee_rotation: 3
+    follow_right_gripper: 2
+  action_horizon: 32
+  action_horizon_flow: 32
+  use_state_string_representation: false
+
+model:
+  backbone: qwen2_5
+  config_path: workspace/models_config/qwen2_5_moe_flash.json
+  processor_path: Qwen/Qwen2.5-VL-3B-Instruct
+  pretrained_path: Qwen/Qwen2.5-VL-3B-Instruct
+  attn_deterministic: true
+  use_ema: false
+  flow_loss_weight: 1.0
+  enable_customized_robot_config: true
+  customized_robot_config:
+    name: your_robot
+    customized_dof_config:
+      action: 7
+    customized_agent_pos_config:
+      observation.state: 8
+
+hyperparams:
+  num_epoch: 100
+  batch_size_per_gpu: 8
+  gradient_accumulation_steps: 2
+  seed: 10233
+  optimizer:
+    optimizer_type: dmuon
+    learning_rate: 0.0001
+    max_grad_norm: 1.0
+    enable_grad_clip: true
+    betas: [0.9, 0.95]
+    weight_decay: 1.0e-8
+    eps: 1.0e-8
+  scheduler:
+    scheduler_type: cosine
+    num_warmup_steps: 1000
+    num_training_steps: 64000000
+    min_lr: 1.0e-5
+
+distributed:
+  use_fsdp: true
+  use_mixed_precision: true
+  bf16: true
+
+data:
+  dataset_type: lerobot
+  lerobot_config:
+    repo_id: /path/to/your/lerobot_dataset
+    root: null
+  key_mappings:
+    camera:
+      observation.images.image: face_view
+      observation.images.image2: right_wrist_view
+    state: observation.state
+    action: action
+  norm_stats_path: /path/to/your/norm_stats.json
+  train_test_split: 0.95
+  num_workers: 4
+  resolution:
+    face_view: 256
+    left_wrist_view: 256
+    right_wrist_view: 256
+
+logging:
+  log_name: wallx_lerobot_train
+  log_project: wallx_public
+  log_entity: null
+  use_wandb: false
+  log_interval: 10
+  save_interval: 1000000
+  val_interval: 1000000
+  epoch_save_interval: 1
+
+checkpoint:
+  save_path: /path/to/output/checkpoints
+
+debug:
+  profile: false
+  nvtx: false

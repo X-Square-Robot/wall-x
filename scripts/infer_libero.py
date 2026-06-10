@@ -1,222 +1,235 @@
-import argparse
-import time
-import os
+#!/usr/bin/env python3
+"""Run LIBERO evaluation through harrix.
 
-# from wall_x.utils.baseline_utils import check_baseline_dump, update_baseline
-from wall_x.infer.utils_libero import set_seed_everywhere, TaskSuite, TASK_MAX_STEPS
-from wall_x.infer.infer_config import InferConfig
-from wall_x.infer.env_libero import LiberoRobotEnv
+The script accepts either a full harrix EvalConfig YAML or a checkpoint path
+plus common command-line overrides. It intentionally bypasses the legacy
+Wall-X inference stack.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import tempfile
+from pathlib import Path
+
+import yaml
+
+LIBERO_DEFAULT_MAX_INFER_TIMES = {
+    "libero_spatial": 22,
+    "libero_object": 28,
+    "libero_goal": 30,
+    "libero_10": 52,
+    "libero_90": 40,
+}
+
+
+def _ensure_local_harrix_on_path() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    harrix_python = repo_root / "third_party" / "harrix" / "python"
+    if harrix_python.is_dir():
+        sys.path.insert(0, str(harrix_python))
+
+
+def _parse_task_indices(value: str | None) -> list[int] | None:
+    if value is None or value.strip() == "":
+        return None
+    return [int(x) for x in value.split(",") if x.strip()]
+
+
+def _resolve_max_infer_times(
+    task_suite_name: str | None, max_infer_times: int | None
+) -> int:
+    if max_infer_times is not None:
+        return max_infer_times
+    suite = task_suite_name or "libero_spatial"
+    return LIBERO_DEFAULT_MAX_INFER_TIMES.get(suite, 22)
+
+
+def _load_or_build_raw_config(args: argparse.Namespace) -> dict:
+    if args.config is not None:
+        with open(args.config, "r") as f:
+            raw = yaml.safe_load(f) or {}
+        model = raw.setdefault("model", {})
+        env = raw.setdefault("env", {})
+        libero = env.setdefault("libero", {})
+        runtime = raw.setdefault("runtime", {})
+        debug = raw.setdefault("debug", {})
+        if args.checkpoint_path is not None:
+            model["checkpoint_path"] = args.checkpoint_path
+        if args.train_config_path is not None:
+            model["train_config_path"] = args.train_config_path
+        task_indices = _parse_task_indices(args.task_indices)
+        if task_indices is not None:
+            libero["task_indices"] = task_indices
+        if args.max_infer_times is not None or libero.get("max_infer_times") is None:
+            libero["max_infer_times"] = _resolve_max_infer_times(
+                libero.get("task_suite_name", args.task_suite_name),
+                args.max_infer_times,
+            )
+        if args.smoke:
+            libero["task_indices"] = [0]
+            libero["num_trials_per_task"] = 5
+            runtime["num_workers"] = 1
+            runtime["max_batch_size"] = 1
+        if args.deterministic_model:
+            debug["deterministic_model"] = True
+        return raw
+    else:
+        if args.checkpoint_path is None:
+            raise ValueError("--checkpoint-path is required when --config is not set")
+        max_infer_times = _resolve_max_infer_times(
+            args.task_suite_name, args.max_infer_times
+        )
+        raw = {
+            "model": {
+                "checkpoint_path": args.checkpoint_path,
+                "norm_key": args.norm_key,
+                "cam_names": args.cam_names,
+                "architecture": args.architecture,
+                "action_mode": args.action_mode,
+            },
+            "env": {
+                "type": "libero",
+                "seed": args.seed,
+                "libero": {
+                    "task_suite_name": args.task_suite_name,
+                    "initial_states_path": args.initial_states_path,
+                    "num_trials_per_task": args.num_trials_per_task,
+                    "max_infer_times": max_infer_times,
+                    "skip_intermediate_render": args.skip_intermediate_render,
+                },
+            },
+            "runtime": {
+                "num_workers": args.num_workers,
+                "max_batch_size": args.max_batch_size,
+                "ws_port": args.ws_port,
+                "log_dir": args.log_dir,
+                "driver_mode": args.driver_mode,
+            },
+            "debug": {"deterministic_model": args.deterministic_model},
+        }
+
+    model = raw.setdefault("model", {})
+    env = raw.setdefault("env", {})
+    libero = env.setdefault("libero", {})
+    runtime = raw.setdefault("runtime", {})
+    debug = raw.setdefault("debug", {})
+
+    if args.checkpoint_path is not None:
+        model["checkpoint_path"] = args.checkpoint_path
+    if args.train_config_path is not None:
+        model["train_config_path"] = args.train_config_path
+    if args.norm_key is not None:
+        model["norm_key"] = args.norm_key
+    if args.cam_names is not None:
+        model["cam_names"] = args.cam_names
+    if args.action_horizon is not None:
+        model["action_horizon"] = args.action_horizon
+    if args.architecture is not None:
+        model["architecture"] = args.architecture
+    if args.action_mode is not None:
+        model["action_mode"] = args.action_mode
+
+    env["type"] = "libero"
+    env["seed"] = args.seed
+    libero["task_suite_name"] = args.task_suite_name
+    libero["initial_states_path"] = args.initial_states_path
+    libero["num_trials_per_task"] = args.num_trials_per_task
+    libero["max_infer_times"] = _resolve_max_infer_times(
+        args.task_suite_name, args.max_infer_times
+    )
+    libero["skip_intermediate_render"] = args.skip_intermediate_render
+    task_indices = _parse_task_indices(args.task_indices)
+    if task_indices is not None:
+        libero["task_indices"] = task_indices
+    if args.smoke:
+        libero["task_indices"] = [0]
+        libero["num_trials_per_task"] = 5
+        runtime["num_workers"] = 1
+        runtime["max_batch_size"] = 1
+
+    runtime["num_workers"] = (
+        args.num_workers if not args.smoke else runtime["num_workers"]
+    )
+    runtime["max_batch_size"] = (
+        args.max_batch_size if not args.smoke else runtime["max_batch_size"]
+    )
+    runtime["ws_port"] = args.ws_port
+    runtime["log_dir"] = args.log_dir
+    runtime["driver_mode"] = args.driver_mode
+    debug["deterministic_model"] = args.deterministic_model
+    return raw
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--config", default=None, help="Optional harrix EvalConfig YAML."
+    )
+    parser.add_argument("--checkpoint-path", default=None)
+    parser.add_argument("--train-config-path", default=None)
+    parser.add_argument("--norm-key", default="libero_all")
+    parser.add_argument("--architecture", default="qwen2_5")
+    parser.add_argument("--action-mode", default="flow")
+    parser.add_argument(
+        "--cam-names", nargs="+", default=["face_view", "right_wrist_view"]
+    )
+    parser.add_argument("--action-horizon", type=int, default=None)
+    parser.add_argument("--task-suite-name", default="libero_spatial")
+    parser.add_argument("--initial-states-path", default="DEFAULT")
+    parser.add_argument("--num-trials-per-task", type=int, default=50)
+    parser.add_argument(
+        "--task-indices", default=None, help="Comma-separated task ids."
+    )
+    parser.add_argument(
+        "--max-infer-times",
+        type=int,
+        default=None,
+        help=(
+            "Number of model action chunks per episode. Defaults are suite-specific "
+            "and match the internal LIBERO evaluator."
+        ),
+    )
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--num-workers", type=int, default=1)
+    parser.add_argument("--max-batch-size", type=int, default=1)
+    parser.add_argument("--ws-port", type=int, default=8765)
+    parser.add_argument("--log-dir", default="/tmp/harrix_libero_eval")
+    parser.add_argument("--driver-mode", choices=["in_process"], default="in_process")
+    parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--deterministic-model", action="store_true")
+    parser.add_argument(
+        "--skip-intermediate-render",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    _ensure_local_harrix_on_path()
+
+    from wall_x._vendor.harrix.eval_config import (
+        autofill_from_checkpoint,
+        load_eval_config,
+    )
+
+    raw = _load_or_build_raw_config(args)
+
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+        yaml.safe_dump(raw, f, sort_keys=False)
+        tmp_config = f.name
+
+    cfg = autofill_from_checkpoint(load_eval_config(tmp_config))
+    if cfg.runtime.driver_mode != "in_process":
+        raise ValueError("Only driver_mode='in_process' is supported")
+    from wall_x._vendor.harrix.drivers.inproc import run
+
+    run(cfg)
+    return 0
 
 
 if __name__ == "__main__":
-    args = argparse.ArgumentParser(description="Wall-X Libero evaluation script")
-    args.add_argument("--seed", type=int, default=42, help="Random seed")
-    args.add_argument("--id", type=int, default=None, help="Unique index id")
-    args.add_argument("--name", type=int, default=None, help="Launch command name")
-    args.add_argument(
-        "--baseline_path", type=str, default=None, help="Path to baseline record table"
-    )
-    args.add_argument(
-        "--update_baseline",
-        type=bool,
-        default=False,
-        help="Whether to update baseline table",
-    )
-    args.add_argument(
-        "--mode", type=str, default="flow", choices=["flow", "ar"], help="Running mode"
-    )
-    args.add_argument(
-        "--checkpoint_path", type=str, required=True, help="Model checkpoint path"
-    )
-    args.add_argument(
-        "--train_config_path",
-        type=str,
-        required=False,
-        default=None,
-        help="Path to training config .yml file",
-    )
-    args.add_argument(
-        "--norm_key",
-        type=str,
-        default="physical-intelligence/libero",
-        help="Key for normalization statistics",
-    )
-    args.add_argument(
-        "--cam_names",
-        nargs="+",
-        default=["face_view", "right_wrist_view"],
-        help="List of camera names (e.g., --cam_names face_view right_wrist_view)",
-    )
-    args.add_argument(
-        "--task_suite_name",
-        type=str,
-        default=TaskSuite.LIBERO_SPATIAL,
-        choices=[e.value for e in TaskSuite],
-        help="Libero task suite to load",
-    )
-    args.add_argument(
-        "--initial_states_path",
-        type=str,
-        default="DEFAULT",
-        help="Path to initial states .json file, or 'DEFAULT' to use default states.",
-    )
-    args.add_argument(
-        "--num_trials_per_task",
-        type=int,
-        default=50,
-        help="Number of evaluation episodes to run per task",
-    )
-    args.add_argument(
-        "--rollout_dir",
-        type=str,
-        default="./rollouts",
-        help="Directory to save rollout videos",
-    )
-    args = args.parse_args()
-
-    print(f"Using random seed: {args.seed}")
-    set_seed_everywhere(args.seed)
-
-    print("Initializing InferConfig...")
-    if args.train_config_path is None:
-        args.train_config_path = os.path.join(args.checkpoint_path, "config.yml")
-
-    config = InferConfig(
-        checkpoint_path=args.checkpoint_path,
-        train_config_path=args.train_config_path,
-        norm_key=args.norm_key,
-        cam_names=args.cam_names,
-    )
-    if args.mode == "flow":
-        config.action_horizon = config.train_config.get("data", {}).get(
-            "action_horizon_flow", 10
-        )
-    elif args.mode == "ar":
-        config.action_horizon = config.train_config.get("data", {}).get(
-            "action_horizon_ar", 10
-        )
-    else:
-        raise ValueError(f"Invalid mode: {args.mode}")
-    config.model_device = "cuda"
-
-    print("Initializing LiberoRobotEnv (Evaluator)...")
-
-    config.action_dim = 7
-    config.pred_horizon = 10
-
-    evaluator = LiberoRobotEnv(
-        config=config,
-        task_suite_name=args.task_suite_name,
-        initial_states_path=args.initial_states_path,
-        rollout_dir=args.rollout_dir,
-        seed=args.seed,
-    )
-
-    print(f"\n{'='*20} Starting Evaluation {'='*20}")
-    print(f"Task suite: {args.task_suite_name}")
-    print(f"Number of tasks: {evaluator.num_tasks}")
-    print(f"Trials per task: {args.num_trials_per_task}")
-    print(f"Initial states: {args.initial_states_path}")
-    print(f"Videos will be saved to: {evaluator.rollout_dir}")
-    print(f"{'='*50}\n")
-
-    total_successes = 0
-    total_episodes_run = 0
-    start_time = time.time()
-
-    for task_id in range(evaluator.num_tasks):
-        task_successes = 0
-        task_episodes_attempted = 0
-
-        libero_env_instance = None
-        task_desc = ""
-        initial_states = None
-
-        max_infer_times = TASK_MAX_STEPS[args.task_suite_name]
-        print(
-            f"{args.task_suite_name} TASK_MAX_STEPS: {TASK_MAX_STEPS[args.task_suite_name]}"
-        )
-        for ep_idx in range(args.num_trials_per_task):
-            print(f"  > Running trial {ep_idx + 1} / {args.num_trials_per_task}...")
-
-            try:
-                print(f"\nCreating environment for Task {task_id}...")
-                libero_env_instance, task_desc, initial_states = (
-                    evaluator.create_env_for_task(task_id)
-                )
-                print(
-                    f"--- Starting task {task_id + 1} / {evaluator.num_tasks}: {task_desc} ---"
-                )
-            except Exception as e:
-                print(
-                    f"\n[CRITICAL ERROR] Failed to create environment for task {task_id}: {e}. Skipping entire task."
-                )
-                continue
-
-            task_episodes_attempted += 1
-            total_episodes_run += 1
-
-            success = False
-            try:
-                if args.mode == "flow":
-                    success = evaluator.run_infer_flow_action(
-                        env=libero_env_instance,
-                        task_id=task_id,
-                        task_desc=task_desc,
-                        default_initial_states=initial_states,
-                        episode_idx=ep_idx,
-                        max_infer_times=max_infer_times,
-                    )
-                elif args.mode == "ar":
-                    success = evaluator.run_infer_ar_action(
-                        env=libero_env_instance,
-                        task_id=task_id,
-                        task_desc=task_desc,
-                        default_initial_states=initial_states,
-                        episode_idx=ep_idx,
-                        max_infer_times=max_infer_times,
-                    )
-            except Exception as e:
-                print(f"  [EXCEPTION] Episode run error: {e}")
-
-            if success:
-                task_successes += 1
-                total_successes += 1
-                print("  > Trial result: SUCCESS")
-            else:
-                print("  > Trial result: FAILURE")
-
-            if task_episodes_attempted > 0:
-                print(
-                    f"  > Task {task_id} current success rate: {task_successes / task_episodes_attempted * 100:.1f}% ({task_successes}/{task_episodes_attempted})"
-                )
-            if total_episodes_run > 0:
-                print(
-                    f"  > Overall current success rate: {total_successes / total_episodes_run * 100:.1f}% ({total_successes}/{total_episodes_run})"
-                )
-
-        task_success_rate = (
-            task_successes / task_episodes_attempted
-            if task_episodes_attempted > 0
-            else 0
-        )
-        print(f"\n--- Task {task_id} ({task_desc}) Summary ---")
-        print(
-            f"Success rate: {task_success_rate * 100:.1f}% ({task_successes}/{task_episodes_attempted})"
-        )
-        print(f"{'-'*40}\n")
-
-    end_time = time.time()
-    total_time = end_time - start_time
-    final_success_rate = (
-        total_successes / total_episodes_run if total_episodes_run > 0 else 0
-    )
-
-    print(f"\n{'='*20} Final Evaluation Summary {'='*20}")
-    print(f"Total runtime: {total_time:.2f} seconds ({total_time / 60:.1f} minutes)")
-    print(f"Total trials run: {total_episodes_run}")
-    print(f"Total successes: {total_successes}")
-    print(f"Overall success rate: {final_success_rate * 100:.2f}%")
-    print(f"{'='*56}")
-
-    print("Evaluation completed.")
+    raise SystemExit(main())

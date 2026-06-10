@@ -6,9 +6,10 @@ Works around the StorageMeta compatibility issue between PyTorch versions.
 
 import os
 import sys
-import torch
 from pathlib import Path
 from typing import Dict
+
+import torch
 from safetensors.torch import save_file
 
 
@@ -70,65 +71,16 @@ def load_sharded_checkpoint(checkpoint_dir: str) -> Dict[str, torch.Tensor]:
 
     except AttributeError as e:
         if "StorageMeta" in str(e):
-            print(f"[ERROR] StorageMeta compatibility issue: {e}")
-            print("[INFO] Attempting alternative loading method...")
-            return load_checkpoint_alternative(checkpoint_dir)
-        else:
-            raise
-
-
-def load_checkpoint_alternative(checkpoint_dir: str) -> Dict[str, torch.Tensor]:
-    """
-    Alternative method to load checkpoint by directly reading shard files.
-
-    Args:
-        checkpoint_dir: Path to directory containing .distcp files
-
-    Returns:
-        Dictionary of merged model state
-    """
-    checkpoint_path = Path(checkpoint_dir)
-
-    # Find all shard files
-    shard_files = sorted(checkpoint_path.glob("*.distcp"))
-
-    if not shard_files:
-        raise FileNotFoundError(f"No .distcp files found in {checkpoint_dir}")
-
-    print(f"[INFO] Found {len(shard_files)} shard files")
-
-    # Load all shards
-    merged_state = {}
-
-    for shard_file in shard_files:
-        print(f"[INFO] Loading shard: {shard_file.name}")
-        try:
-            shard_data = torch.load(shard_file, map_location="cpu")
-
-            # Merge the shard into the state dict
-            if isinstance(shard_data, dict):
-                for key, value in shard_data.items():
-                    if isinstance(value, torch.Tensor):
-                        if key in merged_state:
-                            # Handle duplicates - concatenate or overwrite based on shape
-                            print(f"[WARNING] Duplicate key found: {key}")
-                        merged_state[key] = value
-                    elif isinstance(value, dict):
-                        # Nested dict structure
-                        for subkey, subvalue in value.items():
-                            full_key = f"{key}.{subkey}" if key else subkey
-                            if isinstance(subvalue, torch.Tensor):
-                                merged_state[full_key] = subvalue
-
-        except Exception as e:
-            print(f"[WARNING] Failed to load shard {shard_file.name}: {e}")
-            continue
-
-    if not merged_state:
-        raise RuntimeError("Failed to load any checkpoint data from shards")
-
-    print(f"[INFO] Loaded {len(merged_state)} tensors from shards")
-    return merged_state
+            raise RuntimeError(
+                "Unable to load this DCP checkpoint because its metadata uses "
+                "StorageMeta from a different PyTorch version. The previous "
+                "manual .distcp fallback was removed because FSDP shards cannot "
+                "be reconstructed by directly loading shard files and overwriting "
+                "duplicate keys. Please run this script with a PyTorch version "
+                "compatible with the checkpoint writer, or re-save the checkpoint "
+                "with the current PyTorch version."
+            ) from e
+        raise
 
 
 def save_merged_checkpoint(

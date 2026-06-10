@@ -1,2 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
 [tool.ruff]
+line-length = 88
+target-version = "py310"
+exclude = [
+  ".git",
+  ".pytest_cache",
+  ".ruff_cache",
+  "build",
+  "dist",
+  "*.egg-info",
+  "wall_x/_vendor",
+  "wall_x/model/core/ops/csrc",
+  "wall_x/model/qact/qwen2_5/modeling_qwen2_5_vl.py",
+  "wall_x/model/qact/qwen2_5/modeling_qwen2_5_vl_act.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
 per-file-ignores = { "__init__.py" = ["F401", "E402"] }

@@ -1,270 +1,39 @@
-# =============================================================================
-# OPERATING SYSTEM FILES
-# =============================================================================
-
-# macOS
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-
-# Windows
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-$RECYCLE.BIN/
-*.cab
-*.msi
-*.msix
-*.msm
-*.msp
-
-# Linux
-*~
-
-# =============================================================================
-# PYTHON
-# =============================================================================
-
-# Byte-compiled / optimized / DLL files
+# Runtime artifacts
 __pycache__/
 *.py[cod]
-*$py.class
-
-# C extensions
-*.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
 .coverage
 .coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
+htmlcov/
 
-# Translations
-*.mo
-*.pot
+# Local environments and build outputs
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
 
-# Django stuff:
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-*.ipynb
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-.python-version
-
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
-
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# =============================================================================
-# DEVELOPMENT ENVIRONMENT
-# =============================================================================
-
-# VS Code
-.vscode/
-*.code-workspace
-
-# PyCharm
-.idea/
-
-# Vim
-*.swp
-*.swo
-*~
-
-# Emacs
-*~
-\#*\#
-/.emacs.desktop
-/.emacs.desktop.lock
-*.elc
-auto-save-list
-tramp
-.\#*
-
-# =============================================================================
-# PROJECT SPECIFIC
-# =============================================================================
-
-# Model checkpoints and weights
-*.pth
-*.pt
-*.ckpt
-ckpt/
-checkpoints/
-
-# Output directories
-outputs/
-results/
-logs/
-bin/
-
-# Media files
-*.jpg
-*.jpeg
-*.gif
-*.mp4
-*.avi
-*.mov
-*.wav
-*.mp3
-
-# Configuration files with sensitive data
-fuse.cfg
-ray/auth.json
-
-# AI/ML related
-*.ai
-
-# =============================================================================
-# LOGGING AND MONITORING
-# =============================================================================
-
-# General logs
-*.log
-*.err
-*.out
-
-# Weights & Biases
+# Training / inference outputs
 wandb/
-_wandb/
+logs/
+run_logs/
+outputs/
+videos/
+ckpt/
+*.log
 
-# TensorBoard
-runs/
-tensorboard/
+# Large local assets
+*.pth
+*.safetensors
+*.mp4
 
-# MLflow
-mlruns/
+# Editor / OS noise
+.DS_Store
+.vscode/
 
-# =============================================================================
-# TEMPORARY AND CACHE FILES
-# =============================================================================
-
-# Temporary files
-*.tmp
-*.temp
-*.bak
-*.backup
-
-# Cache directories
-.cache/
-cache/
-.ruff_cache/
-
-# =============================================================================
-# FONTS AND ASSETS (if not part of the project)
-# =============================================================================
-
-# Font files (uncomment if fonts should not be tracked)
-# *.ttf
-# *.otf
-# *.woff
-# *.woff2
-
-# =============================================================================
-# PERSONAL/LOCAL FILES
-# =============================================================================
-
-# Personal notes and documentation
-code_update_info.md
-TODO.md
-NOTES.md
-
-# Local configuration
-.env
-.env.local
-.env.*.local
+# Keep exported CUDA kernel sources and Python wrappers tracked:
+#   wall_x/model/core/ops/csrc/
+#   wall_x/model/core/ops/_cuda_ext.py
+#   wall_x/model/core/ops/_cuda_wrappers.py

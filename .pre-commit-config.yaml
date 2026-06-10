@@ -1,13 +1,19 @@
-# See https://pre-commit.com for more information
-# See https://pre-commit.com/hooks.html for more hooks
-exclude: ".git"
+exclude: |
+  (?x)^(
+    wall_x/_vendor/|
+    wall_x/model/core/ops/csrc/|
+    wall_x/model/core/ops/_cuda_ext\.py|
+    wall_x/model/core/ops/_cuda_wrappers\.py|
+    wall_x/model/qact/qwen2_5/modeling_qwen2_5_vl\.py|
+    wall_x/model/qact/qwen2_5/modeling_qwen2_5_vl_act\.py
+  )
 
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.2.2
     hooks:
       - id: ruff
-        args: [ --fix, --exit-non-zero-on-fix ]
+        args: [--fix, --exit-non-zero-on-fix]
 
   - repo: https://github.com/psf/black
     rev: 24.2.0

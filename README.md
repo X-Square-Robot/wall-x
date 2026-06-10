@@ -2,7 +2,6 @@
 
 <div align="left">
 
-<!-- Links -->
 <a href="https://huggingface.co/x-square-robot">
   <img src="https://img.shields.io/badge/Hugging%20Face-x--square--robot-FFB000?style=for-the-badge&logo=huggingface&logoColor=000" alt="Hugging Face">
 </a>
@@ -10,7 +9,6 @@
   <img src="https://img.shields.io/badge/Project-1E90FF?style=for-the-badge&logo=google-chrome&logoColor=fff" alt="Project Page">
 </a>
 
-<!-- Tech stack -->
 <br/>
 <img src="https://img.shields.io/badge/Python-3.10-3776AB?style=flat&logo=python&logoColor=fff" alt="Python 3.10">
 <img src="https://img.shields.io/badge/PyTorch-EE4C2C?style=flat&logo=pytorch&logoColor=fff" alt="PyTorch">
@@ -22,20 +20,33 @@
 </div>
 
 ## Building General-Purpose Robots Based on Embodied Foundation Model
-We are building the embodied foundation model to capture and compress the world's most valuable data: the continuous, high-fidelity stream of physical interaction.
 
-By creating a direct feedback loop between the model's decisions and the body's lived experience, we enable the emergence of a truly generalizable intelligence—one that understands not just how the world works, but how to act effectively within it.
+We are building embodied foundation models to capture and compress the world's
+most valuable data: continuous, high-fidelity physical interaction.
+
+By creating a direct feedback loop between model decisions and the body's lived
+experience, we enable generalizable intelligence that understands not just how
+the world works, but how to act effectively within it.
 
 ## Repository
-This repository provides the training and inference code that supports our WALL series open-source embodied foundation models. It includes end-to-end pipelines for data preparation (LeRobot), model configuration, flow-matching and FAST action branches, and evaluation utilities for real and simulated robots.
+
+This repository provides the training and inference code for the WALL series
+open-source embodied foundation models. It includes LeRobot data preparation,
+model configuration, flow-matching and FAST action branches, public serving and
+evaluation utilities, and exported CUDA operator sources that compile during
+package installation.
 
 ## News
 
-- [May 2026] We introduce [**WALL-WM: Carving World Action Modeling at the Event Joints**](https://x2robot.com/api/files/file/WALL-WM.pdf), a World Action Model that couples future-video imagination with action prediction at their semantic event boundaries, delivering state-of-the-art real-robot manipulation and physically grounded video generation from a single event-pretrained backbone *(Code coming soon!)*.
-- [May 2026] We introduce [**Wall-OSS-0.5: A Deployment-Ready VLA with Gradient-Bridged Pretraining**](https://x2robot.com/api/files/file/wall_oss_05.pdf), an open-source 4B model that delivers directly deployable, zero-shot real-robot manipulation capabilities while serving as a powerful prior for downstream adaptation *(Code coming soon!)*.
-- [Sept 2025] We introduce [**WALL-OSS: Igniting VLMs toward the Embodied Space**](https://x2robot.com/en/research/68bc2cde8497d7f238dde690), an end-to-end embodied foundation model that leverages large-scale multimodal pretraining to achieve (1) embodiment-aware vision–language understanding, (2) strong language–action association, and (3) robust manipulation capability.
+- [June 2026] Wall-X 1.1.0 updates the open-source training and inference
+  stack for Wall-OSS-0.5, including the public serving/evaluation runtime,
+  DMuon training support, and install-time CUDA operator builds.
+- [May 2026] We introduce [**WALL-WM: Carving World Action Modeling at the Event Joints**](https://x2robot.com/api/files/file/WALL-WM.pdf), a World Action Model that couples future-video imagination with action prediction at semantic event boundaries.
+- [May 2026] We introduce [**Wall-OSS-0.5: A Deployment-Ready VLA with Gradient-Bridged Pretraining**](https://x2robot.com/api/files/file/wall_oss_05.pdf), an open-source model for directly deployable real-robot manipulation and downstream adaptation.
+- [Sept 2025] We introduce [**WALL-OSS: Igniting VLMs toward the Embodied Space**](https://x2robot.com/en/research/68bc2cde8497d7f238dde690), an end-to-end embodied foundation model that leverages large-scale multimodal pretraining to achieve embodiment-aware vision-language understanding, language-action association, and robust manipulation capability.
 
 ## Models
+
 - WALL-OSS-0.5: https://huggingface.co/x-square-robot/wall-oss-0.5
 - WALL-OSS-FLOW-0.1: https://huggingface.co/x-square-robot/wall-oss-flow-0.1
 - WALL-OSS-FLOW: https://huggingface.co/x-square-robot/wall-oss-flow
@@ -43,103 +54,140 @@ This repository provides the training and inference code that supports our WALL 
 
 ## Environment Setup
 
-Create and activate conda environment:
+Create and activate a conda environment:
+
 ```bash
 conda create --name wallx python=3.10
 conda activate wallx
 ```
 
 Install requirements:
+
 ```bash
 pip install -r requirements.txt
 MAX_JOBS=4 pip install flash-attn==2.7.4.post1 --no-build-isolation
 ```
 
-Install lerobot:
+Install DMuon, which is used by the default training configs:
+
 ```bash
-git clone https://github.com/huggingface/lerobot.git
-git checkout c66cd401767e60baece16e1cf68da2824227e076
-cd lerobot
-pip install -e .
+pip install "dmuon @ git+https://github.com/X-Square-Robot/dmuon.git"
 ```
 
-Install wall_x:
+Install LeRobot:
+
 ```bash
-git submodule update --init --recursive
-MAX_JOBS=4 pip install --no-build-isolation --verbose -e .
+git clone https://github.com/huggingface/lerobot.git
+cd lerobot
+git checkout c66cd401767e60baece16e1cf68da2824227e076
+pip install --no-deps -e .
 ```
+
+Use `--no-deps` for LeRobot so it does not override the Wall-X dependency
+versions installed from `requirements.txt`.
+
+Install Wall-X:
+
+```bash
+MAX_JOBS=8 pip install --no-build-isolation -e .
+```
+
+Public helper scripts live under `scripts/`; the examples below use the
+repository-root form, such as `python scripts/fake_inference.py`.
+
+The exported CUDA operator sources are included in
+`wall_x/model/core/ops/csrc/`. `setup.py` builds them with PyTorch
+`CUDAExtension` when Wall-X is installed. `ninja` is included in
+`requirements.txt` for parallel builds, and `MAX_JOBS` controls compile
+parallelism. `--no-build-isolation` is required so the build can use the torch
+package already installed in the active environment.
 
 ## Training
 
 ### Finetune on LeRobot Datasets
 
-Before training, please refer to `workspace/README.md` for detailed configuration instructions including:
+Before training, see `workspace/README.md` for configuration details,
+including:
 
-Training script path configuration
-
+- Training script configuration
 - GPU setup
 - Model and data paths
 - Robot DOF configuration
 - Training hyperparameters
 
-Download the Flow/FAST pretrained model and run:
+Download the pretrained checkpoint, copy
+`workspace/example/lerobot/qwen2_5_lerobot_template.yml`, replace the
+placeholder paths, and launch training with:
+
 ```bash
-bash ./workspace/lerobot_example/run.sh
+python -m wall_x.trainer.fsdp_trainer.train_fsdp --config <path/to/config.yml>
 ```
+
+For Wall-OSS-0.5 fine-tuning, normalization, LIBERO evaluation, and open-loop
+WebSocket evaluation instructions, see `workspace/README.md`.
 
 ## Inference
 
 ### Basic Action Inference
 
-For model inference, please refer to:
+For a minimal end-to-end example, run:
 
 ```bash
-python ./scripts/fake_inference.py
+python scripts/fake_inference.py --checkpoint-path <path/to/checkpoint>
 ```
 
 This script demonstrates how to:
-- Load the Wall-OSS model using `Qwen2_5_VLMoEForAction.from_pretrained()`
-- Prepare input data including proprioceptive information, attention masks, and dataset specifications
-- Run inference in validation mode with proper data types (bfloat16)
-- Validate model outputs and check for numerical stability
 
-### Open-Loop Evaluation
+- Load the Wall-OSS model with `Qwen2_5_VLMoEForAction.from_pretrained()`
+- Prepare proprioceptive inputs, attention masks, and dataset specs
+- Run inference in `validate` mode at bfloat16
+- Validate output shape and check numerical stability
 
-To generate an open-loop comparison plot, please follow:
+### Simulator Evaluation
 
-```bash
-python ./scripts/draw_openloop_plot.py
-```
-
-### VQA Inference and Chain-of-Thought Testing
-
-To run VQA inference and test the model's Chain-of-Thought (COT) reasoning capabilities, please follow:
+Convenience launchers for closed-loop simulator evaluation live under
+`scripts/`. LIBERO simulator setup is optional and documented with the helper
+scripts; see `scripts/README.md`.
 
 ```bash
-python ./scripts/vqa_inference.py
+bash scripts/run_libero.sh <path/to/checkpoint>
 ```
 
-This script can be used to test the model's COT reasoning abilities for embodied tasks. Below is an example of COT testing:
+### WebSocket Serving
 
-**Input Image:**
+Start a Wall-X WebSocket server with:
 
-![COT Example Frame](assets/cot_example_frame.png)
-
-**Input Text:**
+```bash
+bash scripts/run_serving.sh \
+  --checkpoint-path <path/to/checkpoint> \
+  --train-config-path <path/to/config.yml> \
+  --port 32195
 ```
-To move the red block in the plate with same color, what should you do next? Think step by step.
-```
 
-**Model Output (COT Reasoning):**
-```
-To move the red block in the plate with the same color, you should first locate the red block. It is currently positioned on the table, not in the plate. Then, you should carefully grasp the red block using your fingers. Next, you should use your hand to lift the red block from the table and place it into the plate that is also red in color. Ensure that the red block is securely placed in the plate without slipping or falling.
+The wrapper has no built-in checkpoint path. It returns raw model action chunks
+by default, which is suitable for open-loop evaluation. Pass
+`--serialize-actions` for clients that expect robot-serialized actions.
+
+### Open-Loop WebSocket Evaluation
+
+To compare predictions from a running Wall-X WebSocket server against LeRobot
+ground truth, run:
+
+```bash
+python scripts/draw_openloop_plot.py \
+  --uri ws://127.0.0.1:32195 \
+  --dataset-root <path/to/lerobot_dataset> \
+  --train-config <path/to/config.yml> \
+  --episode-indices 0,1,2
 ```
 
 ## Join Our Community
-- Scan the QR code on WeChat to join the discussion group, where you can engage in in-depth exchanges with community developers and the official team.
+
+Scan the QR code on WeChat to join the discussion group.
+
 <img src="assets/QRcode_community.jpg" alt="QR Code" width="400">
 
-## 📚 Cite Us
+## Cite Us
 
 If you find WALL-OSS models useful, please cite:
 

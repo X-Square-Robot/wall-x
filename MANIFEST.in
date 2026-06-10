@@ -1,0 +1,6 @@
+include README.md
+include README.zh-CN.md
+include LICENSE
+include requirements.txt
+include requirements-libero.txt
+recursive-include wall_x/model/core/ops/csrc *.cu *.cuh *.h
