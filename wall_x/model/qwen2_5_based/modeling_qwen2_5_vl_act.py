@@ -921,7 +921,75 @@ class Qwen2_5_VLMoEForAction(
             state_dict.update(sd)
         if embed_tokens_size != len(processor.tokenizer):
             model.resize_token_embeddings(embed_tokens_size)
-        model.load_state_dict(state_dict, strict=False)
+        # Checkpoints may store fused projections (qkv_proj_experts /
+        # gate_up_proj, newer transformers naming) while the installed
+        # transformers version builds split modules. Slice fused tensors along
+        # dim 0 using the target sibling shapes (HF concat order: q;k;v / gate;up).
+        _model_sd = model.state_dict()
+
+        def _split_fused(fused_key, part_keys):
+            v = state_dict.pop(fused_key)
+            sizes = [_model_sd[p].shape[0] for p in part_keys]
+            if sum(sizes) != v.shape[0]:
+                print(
+                    f"Warning: skip fused split {fused_key}: "
+                    f"{v.shape[0]} != {sizes}",
+                    flush=True,
+                )
+                state_dict[fused_key] = v
+                return 0
+            off = 0
+            for p, s in zip(part_keys, sizes):
+                state_dict[p] = v[off : off + s].clone()
+                off += s
+            return 1
+
+        _n_split = 0
+        for _k in list(state_dict.keys()):
+            _base, _, _kind = _k.rpartition(".")
+            if ".self_attn.qkv_proj_experts." in _k:
+                _parts = [
+                    _base.replace("qkv_proj_experts", f"{x}_proj_experts") + "." + _kind
+                    for x in ("q", "k", "v")
+                ]
+            elif _base.endswith("gate_up_proj"):
+                _parts = [
+                    _base.replace("gate_up_proj", f"{x}_proj") + "." + _kind
+                    for x in ("gate", "up")
+                ]
+            else:
+                continue
+            if all(p in _model_sd for p in _parts):
+                _n_split += _split_fused(_k, _parts)
+        if _n_split:
+            print(
+                f"Adapted {_n_split} fused checkpoint tensors to split module naming",
+                flush=True,
+            )
+
+        # Drop checkpoint tensors whose shape disagrees with the current build
+        # (e.g. multi-embodiment action in/out projections vs a customized
+        # dof_config); those layers re-initialize for the new embodiment.
+        # load_state_dict(strict=False) alone still raises on shape mismatch.
+        for _k in list(state_dict.keys()):
+            if _k in _model_sd and state_dict[_k].shape != _model_sd[_k].shape:
+                print(
+                    f"Re-initializing shape-mismatched checkpoint key {_k}: "
+                    f"{tuple(state_dict[_k].shape)} -> fresh init {tuple(_model_sd[_k].shape)}",
+                    flush=True,
+                )
+                del state_dict[_k]
+        _load_report = model.load_state_dict(state_dict, strict=False)
+        # Report what actually loaded; silent key mismatches are hard to debug
+        print(
+            f"Pretrained weight load report: {len(_load_report.missing_keys)} missing, "
+            f"{len(_load_report.unexpected_keys)} unexpected",
+            flush=True,
+        )
+        for _k in _load_report.missing_keys[:40]:
+            print(f"  missing: {_k}", flush=True)
+        for _k in _load_report.unexpected_keys[:40]:
+            print(f"  unexpected: {_k}", flush=True)
 
         return model
 

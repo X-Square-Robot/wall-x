@@ -590,6 +590,9 @@ class QwenVlAct_Trainer:
                     if self.use_fast_tokenizer
                     else None
                 ),
+                # propagate selective recompute into the model build
+                # (the config flag was silently ignored on this branch)
+                use_selective_recompute=self.use_selective_recompute,
             )
             self.processor = model.processor
             model = model.to(torch.bfloat16)
@@ -663,7 +666,14 @@ class QwenVlAct_Trainer:
             print("Freezing VLM parameters, training only MoE experts", flush=True)
             moe_params = []
             for name, param in model.named_parameters():
-                if "moe.experts.1." not in name:
+                # Optionally keep action_preprocessor trainable: its action
+                # in/out projections re-initialize when fine-tuning a customized
+                # dof_config and must then train alongside the experts
+                # (enable via train_action_preprocessor: true)
+                _train_ap = self.config.get("train_action_preprocessor", False) and (
+                    "action_preprocessor." in name and "normalizer" not in name
+                )
+                if "moe.experts.1." not in name and not _train_ap:
                     param.requires_grad = False
                 else:
                     moe_params.append(param)

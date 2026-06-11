@@ -498,9 +498,16 @@ def load_lerobot_data(
     batch_size = config.get("batch_size_per_gpu", 8)
     episodes = np.arange(episodes_num).tolist()
 
-    train_test_split = dataload_config.get("train_test_split", 0.95)
-    train_episodes = episodes[: int(episodes_num * train_test_split)]
-    test_episodes = episodes[int(episodes_num * train_test_split) :]
+    # Respect an explicit episode list from lerobot_config (e.g. to hold out
+    # evaluation episodes); falls back to the original sequential split
+    cfg_episodes = lerobot_config.get("episodes", None)
+    if cfg_episodes:
+        train_episodes = list(cfg_episodes)
+        test_episodes = [e for e in episodes if e not in set(train_episodes)]
+    else:
+        train_test_split = dataload_config.get("train_test_split", 0.95)
+        train_episodes = episodes[: int(episodes_num * train_test_split)]
+        test_episodes = episodes[int(episodes_num * train_test_split) :]
 
     train_dataset = LeRobotDataset(
         repo_id,
