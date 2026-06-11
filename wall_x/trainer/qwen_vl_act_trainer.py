@@ -954,10 +954,13 @@ class QwenVlAct_Trainer:
                 os.path.join(ckpt_path, "normalizer_propri.pth"),
             )
 
-        # Save current iter steps
-        if step != 0:  # step==0, no need for dataset resume
+        # Save current iter steps. Guarded: lerobot datasets have no pool
+        # cursors, and self.data_config does not exist on this class (the
+        # attribute is dataload_config), so every checkpoint save on the
+        # lerobot path raised AttributeError here.
+        if step != 0 and hasattr(self.dataset, "secondary_pool_start_index"):
             _rank = self.accelerator.process_index
-            if self.data_config["multimodal_data_ratio"] != 1:
+            if self.config.get("multimodal_data_ratio", 1) != 1:
                 torch.save(
                     {
                         "episode_start_index": self.dataset.primary_pool_start_index.value
