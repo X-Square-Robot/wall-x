@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import torch
 
 
 def _ensure_local_harrix_on_path() -> None:
@@ -54,6 +55,38 @@ def _build_fake_observation(seed: int, image_size: int, gripper_dim: int) -> dic
     }
 
 
+def _predict_raw_action(adapter, payload: dict) -> np.ndarray:
+    from wall_x._vendor.harrix.envs.libero_common import encode_proprio
+
+    observation = encode_proprio(
+        payload["observation"], adapter._train_config, adapter._action_horizon
+    )
+    prefix, postfix = adapter._get_flow_prompt(payload["instruction"])
+    batch_inputs = adapter._construct_model_input([observation], [prefix], [postfix])
+
+    dataset_names = batch_inputs["dataset_names"]
+    padding = torch.zeros(
+        (len(dataset_names), 1, adapter._action_dim),
+        dtype=torch.float32,
+    )
+    padding_action = adapter._normalizer_action.normalize_data(
+        padding, dataset_names
+    ).to(batch_inputs["input_ids"].device)
+
+    model_output = adapter._model.generate_flow_action(
+        action_horizon=adapter._action_horizon,
+        action_dim=adapter._action_dim,
+        num_inference_timesteps=adapter._num_inference_timesteps,
+        padding_action=padding_action,
+        noise=payload.get("noise"),
+        **batch_inputs,
+    )
+    predict_action = model_output["predict_action"]
+    if isinstance(predict_action, torch.Tensor):
+        predict_action = predict_action.detach().cpu().numpy()
+    return np.asarray(predict_action[0])
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -64,7 +97,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional training config path. Defaults to config.yml/config.yaml next to the checkpoint.",
     )
-    parser.add_argument("--norm-key", default="libero_all")
+    parser.add_argument("--norm-key", default="x2_normal")
     parser.add_argument("--architecture", default="qwen2_5")
     parser.add_argument("--action-mode", default="flow")
     parser.add_argument(
@@ -110,8 +143,7 @@ def main() -> int:
         "instruction": args.instruction,
         "noise": None,
     }
-    actions = adapter.predict_batch([payload])
-    action = np.asarray(actions[0])
+    action = _predict_raw_action(adapter, payload)
 
     print("Fake inference succeeded.")
     print(f"action shape: {action.shape}")
