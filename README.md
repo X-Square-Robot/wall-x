@@ -41,9 +41,9 @@ package installation.
 - [June 2026] Wall-X 1.1.0 updates the open-source training and inference
   stack for Wall-OSS-0.5, including the public serving/evaluation runtime,
   DMuon training support, and install-time CUDA operator builds.
-- [May 2026] We introduce [**WALL-WM: Carving World Action Modeling at the Event Joints**](https://x2robot.com/api/files/file/WALL-WM.pdf), a World Action Model that couples future-video imagination with action prediction at semantic event boundaries.
-- [May 2026] We introduce [**Wall-OSS-0.5: A Deployment-Ready VLA with Gradient-Bridged Pretraining**](https://x2robot.com/api/files/file/wall_oss_05.pdf), an open-source model for directly deployable real-robot manipulation and downstream adaptation.
-- [Sept 2025] We introduce [**WALL-OSS: Igniting VLMs toward the Embodied Space**](https://x2robot.com/en/research/68bc2cde8497d7f238dde690), an end-to-end embodied foundation model that leverages large-scale multimodal pretraining to achieve embodiment-aware vision-language understanding, language-action association, and robust manipulation capability.
+- [May 2026] We introduce [**WALL-WM: Carving World Action Modeling at the Event Joints**](https://arxiv.org/pdf/2606.01955), a World Action Model that couples future-video imagination with action prediction at semantic event boundaries.
+- [May 2026] We introduce [**Wall-OSS-0.5: A Deployment-Ready VLA with Gradient-Bridged Pretraining**](https://arxiv.org/pdf/2605.30877v2), an open-source model for directly deployable real-robot manipulation and downstream adaptation.
+- [Sept 2025] We introduce [**WALL-OSS: Igniting VLMs toward the Embodied Space**](https://arxiv.org/pdf/2509.11766), an end-to-end embodied foundation model that leverages large-scale multimodal pretraining to achieve embodiment-aware vision-language understanding, language-action association, and robust manipulation capability.
 
 ## Models
 
