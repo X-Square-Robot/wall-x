@@ -44,7 +44,6 @@ pip install "dmuon @ git+https://github.com/X-Square-Robot/dmuon.git"
 ```bash
 git clone https://github.com/huggingface/lerobot.git
 cd lerobot
-git checkout c66cd401767e60baece16e1cf68da2824227e076
 pip install -e .
 ```
 
