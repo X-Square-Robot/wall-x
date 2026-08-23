@@ -261,6 +261,22 @@ class PreprocessedDataset(Dataset[T_co]):
         image_inputs, h, w, resize_h, resize_w = self._vision_preprocess(data)
         agent_pos = data[self._state_key_mapping["state"]]
         action = data[self._action_key_mapping["action"]]
+        # Drop trailing unused DOFs (e.g. velocity/height/head) when config
+        # only trains arms and relies on action_padding for the 26-D slot.
+        state_active = sum(
+            int(d)
+            for k, d in self._agent_pos_config.items()
+            if k not in RELATIVE_SKIP_KEYS
+        )
+        action_active = sum(
+            int(d)
+            for k, d in self._dof_config.items()
+            if k not in RELATIVE_SKIP_KEYS
+        )
+        if state_active and agent_pos.shape[-1] > state_active:
+            agent_pos = agent_pos[..., :state_active]
+        if action_active and action.shape[-1] > action_active:
+            action = action[..., :action_active]
         agent_pos = self._maybe_convert_euler_to_6d(
             agent_pos, self._agent_pos_config, self._convert_state_euler_to_6d
         )
@@ -342,7 +358,7 @@ class PreprocessedDataset(Dataset[T_co]):
             ),
             pin_memory=True,  # Enable for GPU training
             persistent_workers=num_workers > 0,  # Only if num_workers > 0
-            prefetch_factor=2,  # Reduce memory usage
+            prefetch_factor=2 if num_workers > 0 else None,
             drop_last=True,  # Avoid incomplete batches
         )
 
@@ -378,7 +394,7 @@ class PreprocessedDataset(Dataset[T_co]):
             ),
             pin_memory=True,
             persistent_workers=num_workers > 0,
-            prefetch_factor=2,
+            prefetch_factor=2 if num_workers > 0 else None,
             drop_last=False,
         )
 

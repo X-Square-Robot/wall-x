@@ -891,20 +891,6 @@ class EX001Robot(Robot):
         super().__init__(config, robot_id)
         self.last_speed = [0, 0, 0]
 
-    def _get_velocity_decomposed(
-        self, robot_state_action_data: RobotStateActionData
-    ) -> np.ndarray:
-        """Get decomposed velocity actions: concat state and action velocity_decomposed_odom"""
-        velocity_decomposed = np.concatenate(
-            [
-                robot_state_action_data.data["state_velocity_decomposed_odom"],
-                robot_state_action_data.data["action_velocity_decomposed_odom"],
-            ],
-            axis=0,
-        )
-        self.last_speed = velocity_decomposed[-1, :].copy().tolist()
-        return velocity_decomposed
-
     def _get_head_action(
         self, robot_state_action_data: RobotStateActionData
     ) -> np.ndarray:
@@ -913,27 +899,63 @@ class EX001Robot(Robot):
             state_key, action_key = "state_head_rotation", "action_head_rotation"
         else:
             state_key, action_key = "state_head_actions", "action_head_actions"
-        head_actions = np.concatenate(
-            [
-                robot_state_action_data.data[state_key],
-                robot_state_action_data.data[action_key],
-            ],
-            axis=0,
-        )
-        return head_actions
+        state = robot_state_action_data.data.get(state_key)
+        action = robot_state_action_data.data.get(action_key)
+        horizon = int(getattr(self.config, "action_horizon", 32) or 32)
+        # Training with action_padding does not emit head actions; hold current state.
+        if state is None or np.asarray(state).ndim == 0:
+            state = np.array([[0.0, 0.25]], dtype=np.float64)
+        else:
+            state = np.asarray(state, dtype=np.float64)
+            if state.ndim == 1:
+                state = state.reshape(1, -1)
+        if action is None or np.asarray(action).ndim == 0:
+            action = np.repeat(state[:1], horizon, axis=0)
+        else:
+            action = np.asarray(action, dtype=np.float64)
+            if action.ndim == 1:
+                action = action.reshape(-1, state.shape[-1])
+        return np.concatenate([state, action], axis=0)
 
     def _get_height_action(
         self, robot_state_action_data: RobotStateActionData
     ) -> np.ndarray:
         """Get lift height actions: concat state and action height sequence"""
-        height = np.concatenate(
-            [
-                robot_state_action_data.data["state_height"],
-                robot_state_action_data.data["action_height"],
-            ],
-            axis=0,
-        )
-        return height
+        state = robot_state_action_data.data.get("state_height")
+        action = robot_state_action_data.data.get("action_height")
+        horizon = int(getattr(self.config, "action_horizon", 32) or 32)
+        if state is None or np.asarray(state).ndim == 0:
+            state = np.array([[0.4]], dtype=np.float64)
+        else:
+            state = np.asarray(state, dtype=np.float64).reshape(-1, 1)
+        if action is None or np.asarray(action).ndim == 0:
+            action = np.repeat(state[:1], horizon, axis=0)
+        else:
+            action = np.asarray(action, dtype=np.float64).reshape(-1, 1)
+        return np.concatenate([state, action], axis=0)
+
+    def _get_velocity_decomposed(
+        self, robot_state_action_data: RobotStateActionData
+    ) -> np.ndarray:
+        """Get decomposed velocity actions: concat state and action velocity_decomposed_odom"""
+        state = robot_state_action_data.data.get("state_velocity_decomposed_odom")
+        action = robot_state_action_data.data.get("action_velocity_decomposed_odom")
+        if state is None:
+            state = robot_state_action_data.data.get("state_velocity_decomposed")
+        if action is None:
+            action = robot_state_action_data.data.get("action_velocity_decomposed")
+        horizon = int(getattr(self.config, "action_horizon", 32) or 32)
+        if state is None or np.asarray(state).ndim == 0:
+            state = np.zeros((1, 3), dtype=np.float64)
+        else:
+            state = np.asarray(state, dtype=np.float64).reshape(-1, 3)
+        if action is None or np.asarray(action).ndim == 0:
+            action = np.repeat(state[:1], horizon, axis=0)
+        else:
+            action = np.asarray(action, dtype=np.float64).reshape(-1, 3)
+        velocity_decomposed = np.concatenate([state, action], axis=0)
+        self.last_speed = velocity_decomposed[-1, :].copy().tolist()
+        return velocity_decomposed
 
     def go_home(self):
         """Return to initial pose"""
