@@ -78,6 +78,29 @@ export CKPT_ROOT=/path/to/ckpt
 
 ---
 
+## 2.4 原始数据转换（x2robot → LeRobot v3）
+
+若数据为 x2robot 采集格式，先用仓库根目录的 `x2robot2lerobot.py` 转换：
+
+```bash
+cd "${REPO_ROOT}"
+
+# 1. 复制并编辑转换配置（填入 src_path_list / output_path）
+cp workspace/data_config/arrange_3_flowers_wrc_red_x2robot2lerobot.json /tmp/my_conversion.json
+
+# 2. 运行转换（需 lerobot==0.4.4）
+python x2robot2lerobot.py --config /tmp/my_conversion.json
+```
+
+配置模板与说明见：
+
+- `workspace/data_config/arrange_3_flowers_wrc_red_x2robot2lerobot.json`
+- `workspace/data_config/arrange_3_flowers_wrc_red.yml`（原始采集路径列表示例）
+
+转换输出目录即训练 YAML 中的 `data.lerobot_config.repo_id`。
+
+---
+
 ## 3. LeRobot 数据集要求
 
 外部提供的训练数据应为 **LeRobot v3** 本地数据集，放置于 `data.lerobot_config.repo_id` 所指路径。

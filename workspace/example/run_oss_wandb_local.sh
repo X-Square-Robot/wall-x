@@ -52,7 +52,7 @@ if [[ "${CONFIG}" != *"/"* ]]; then
 fi
 
 # ── conda 环境 ──
-CONDA_HOME="${CONDA_HOME:-/mnt/cpfs/zbl-cpfs-new/USERS/zane/miniconda3}"
+CONDA_HOME="${CONDA_HOME:?Set CONDA_HOME to your miniconda root}"
 CONDA_ENV="${CONDA_ENV:-wallx_oss}"
 source "${CONDA_HOME}/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV}"
@@ -61,16 +61,16 @@ conda activate "${CONDA_ENV}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
 export TMPDIR="${TMPDIR:-/tmp}"
-export CUDA_HOME="${CUDA_HOME:-/mnt/cpfs/zbl-cpfs-new/USERS/zane/cuda-12.6}"
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 # Wall-OSS 用 repo 内 wall_x；清掉可能污染的 PYTHONPATH
 export PYTHONPATH="${REPO_DIR}"
 
 # ── wandb (PAI 内网) ──
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY 2>/dev/null || true
 if [[ "${WANDB_OFFLINE:-0}" != "1" && "${WANDB_OFFLINE:-}" != "true" ]]; then
-    export WANDB_BASE_URL="${WANDB_BASE_URL:-http://192.168.17.255:30880}"
+    export WANDB_BASE_URL="${WANDB_BASE_URL:-}"
     export WANDB_API_KEY="${WANDB_API_KEY:-}"
-    export WANDB_ENTITY="${WANDB_ENTITY:-x2robot}"
+    export WANDB_ENTITY="${WANDB_ENTITY:-}"
 fi
 
 # ── DEBUG=1: 小步数冒烟 ──
@@ -123,7 +123,7 @@ echo "  MASTER         = ${MASTER_ADDR}:${MASTER_PORT}"
 echo "================================================================"
 
 cd "${REPO_DIR}"
-mkdir -p /mnt/cpfs/zbl-cpfs-new/USERS/zane/wall-oss-05/ckpt/arrange_3_flowers_wrc_red
+mkdir -p "${CKPT_ROOT:-/path/to/ckpt}/arrange_3_flowers_wrc_red"
 
 torchrun \
     --nproc_per_node="${NPROC_PER_NODE}" \

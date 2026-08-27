@@ -36,9 +36,9 @@ task:
 
 model:
   backbone: qwen2_5
-  config_path: /mnt/cpfs/zbl-cpfs-new/USERS/zane/wall-oss-05/model/wall-oss-0.5/config.json
-  processor_path: /mnt/cpfs/zbl-cpfs-new/USERS/zane/wall-oss-05/model/Qwen2.5-VL-3B-Instruct
-  pretrained_path: /mnt/cpfs/zbl-cpfs-new/USERS/zane/wall-oss-05/model/Qwen2.5-VL-3B-Instruct
+  config_path: <path/to/wall-oss-0.5>/config.json
+  processor_path: <path/to/Qwen2.5-VL-3B-Instruct
+  pretrained_path: <path/to/Qwen2.5-VL-3B-Instruct
   attn_deterministic: true
   use_ema: false
   flow_loss_weight: 1.0
@@ -71,7 +71,7 @@ distributed:
 data:
   dataset_type: lerobot
   lerobot_config:
-    repo_id: /mnt/cpfs/zbl-cpfs-new/USERS/zane/wall-oss-05/data/arrange_3_flowers_wrc_red_lerobot
+    repo_id: <path/to/data>/arrange_3_flowers_wrc_red_lerobot
     root: null
   key_mappings:
     camera:
@@ -80,7 +80,7 @@ data:
       observation.images.rightImg: right_wrist_view
     state: observation.state
     action: action
-  norm_stats_path: /mnt/cpfs/zbl-cpfs-new/USERS/zane/wall-oss-05/data/arrange_3_flowers_wrc_red_norm_stats.json
+  norm_stats_path: <path/to/data>/arrange_3_flowers_wrc_red_norm_stats.json
   train_test_split: 0.95
   num_workers: 0
   max_length: 1024
@@ -100,8 +100,8 @@ logging:
   epoch_save_interval: 100
 
 checkpoint:
-  save_path: /mnt/cpfs/zbl-cpfs-new/USERS/zane/wall-oss-05/ckpt/arrange_3_flowers_wrc_red_smoke
-  resume_from: /mnt/cpfs/zbl-cpfs-new/USERS/zane/wall-oss-05/model/wall-oss-0.5/model.safetensors
+  save_path: <path/to/ckpt>/arrange_3_flowers_wrc_red_smoke
+  resume_from: <path/to/wall-oss-0.5>/model.safetensors
 
 debug:
   profile: false

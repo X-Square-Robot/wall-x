@@ -9,10 +9,10 @@
 | 项目 | 值 |
 |------|-----|
 | GPU | NVIDIA GeForce RTX 5090 (32GB) |
-| 代码仓 | `/home/x2eng-agent/Documents/zane/code/wall-oss-05/wall-x` |
-| 分支 | `fix/lerobot-dof-layout` |
-| 模型 checkpoint | `/home/x2eng-agent/Documents/zane/model/arrange_3_flowers_wrc_red/3_50000` |
-| Conda 环境 | `/home/x2eng-agent/Documents/zane/conda_envs/wallx` |
+| 代码仓 | `<path/to/wall-x>` |
+| 分支 | `feat/arrange-3-flowers` |
+| 模型 checkpoint | `<path/to/checkpoint>` |
+| Conda 环境 | `<path/to/conda/envs/wallx>` |
 | 服务端口 | `44660` |
 
 ## 一、创建 Conda 环境
@@ -21,8 +21,8 @@
 > 在 `local/env.sh` 中使用 `--prefix` 路径。
 
 ```bash
-conda create --prefix /home/x2eng-agent/Documents/zane/conda_envs/wallx python=3.10 -y
-conda activate /home/x2eng-agent/Documents/zane/conda_envs/wallx
+conda create --prefix <path/to/conda/envs/wallx> python=3.10 -y
+conda activate <path/to/conda/envs/wallx>
 ```
 
 或使用一键脚本：
@@ -36,8 +36,8 @@ bash workspace/rtx5090/install.sh
 **务必使用 conda 环境内的 pip**，避免 pyenv 劫持：
 
 ```bash
-PIP=/home/x2eng-agent/Documents/zane/conda_envs/wallx/bin/pip
-REPO=/home/x2eng-agent/Documents/zane/code/wall-oss-05/wall-x
+PIP=<path/to/conda/envs/wallx>/bin/pip
+REPO=<path/to/wall-x>
 
 # 1. 基础依赖
 $PIP install -r $REPO/requirements.txt
@@ -46,17 +46,17 @@ $PIP install -r $REPO/requirements.txt
 $PIP install "dmuon @ git+https://github.com/X-Square-Robot/dmuon.git"
 
 # 3. LeRobot 0.4.4（不要用 README 里的 c66cd401 commit）
-git clone https://github.com/huggingface/lerobot.git /home/x2eng-agent/Documents/zane/code/lerobot
-cd /home/x2eng-agent/Documents/zane/code/lerobot
+git clone https://github.com/huggingface/lerobot.git <path/to/lerobot>
+cd <path/to/lerobot>
 git checkout v0.4.4
 $PIP install --no-deps -e .
 cd -
 
 # 4. CUDA 12.8 编译工具链（系统默认是 CUDA 13.2，与 torch cu128 不匹配）
-conda install -p /home/x2eng-agent/Documents/zane/conda_envs/wallx \
+conda install -p <path/to/conda/envs/wallx> \
   -y -c conda-forge cuda-nvcc=12.8 cuda-cudart-dev=12.8
 
-export CUDA_HOME=/home/x2eng-agent/Documents/zane/conda_envs/wallx
+export CUDA_HOME=<path/to/conda/envs/wallx>
 export PATH=$CUDA_HOME/bin:$PATH
 export CPATH=$CUDA_HOME/targets/x86_64-linux/include:$CPATH
 export FLASH_ATTN_CUDA_ARCHS=120   # RTX 5090 = sm_120
@@ -72,7 +72,7 @@ MAX_JOBS=8 $PIP install --no-build-isolation -e .
 ### 验证安装
 
 ```bash
-/home/x2eng-agent/Documents/zane/conda_envs/wallx/bin/python -c "
+<path/to/conda/envs/wallx>/bin/python -c "
 import torch, flash_attn, lerobot, wall_x
 import wall_x.model.core.ops._cuda_ext_bin as cuda_ext
 print('torch', torch.__version__, 'cuda', torch.cuda.is_available())
