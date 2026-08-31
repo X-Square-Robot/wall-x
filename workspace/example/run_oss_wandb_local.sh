@@ -1,45 +1,20 @@
 #!/bin/bash
 # ============================================================================
-# Wall-OSS FSDP 训练启动 (PAI DLC / 单机均可)
+# Wall-OSS FSDP 训练启动（单机 / 多机均可）
 #
 # 用法:
+#   CONDA_HOME=/path/to/miniconda3 \
 #   CONFIG=workspace/example/arrange_3_flowers_wrc_red.yml \
 #     bash workspace/example/run_oss_wandb_local.sh
 #
 #   DEBUG=1 ...           # 快速冒烟
 #   WANDB_OFFLINE=1 ...   # 离线 wandb
-#   SKIP_RDMA_INSTALL=1   # 跳过 RDMA 安装
+#
+# 说明:
+#   多机 RDMA / InfiniBand 请在集群镜像中预装；本脚本不再下载私有安装包。
 # ============================================================================
 set -euo pipefail
 nvidia-smi || true
-
-# ── RDMA 用户态驱动库自装 + 探测 ──
-if [[ "${SKIP_RDMA_INSTALL:-0}" != "1" && "${SKIP_RDMA_INSTALL:-}" != "true" ]]; then
-  (
-    echo ""
-    echo "===== install RDMA user-space libs ====="
-    apt-get update && \
-      apt-get install -y --allow-downgrades --allow-change-held-packages --no-install-recommends \
-        libnl-3-dev libnl-route-3-dev libnl-3-200 libnl-route-3-200 \
-        iproute2 udev dmidecode ethtool && \
-      apt-get clean && \
-      rm -rf /var/lib/apt/lists/*
-
-    cd /tmp/ && \
-      wget -q http://pythonrun.oss-cn-zhangjiakou.aliyuncs.com/rdma/nic-libs-mellanox-rdma-5.2-2/nic-lib-rdma-core-installer-ubuntu.tar.gz && \
-      tar xzf nic-lib-rdma-core-installer-ubuntu.tar.gz && \
-      cd nic-lib-rdma-core-installer-ubuntu && \
-      echo Y | /bin/bash install.sh && \
-      cd .. && \
-      rm -rf nic-lib-rdma-core-installer-ubuntu nic-lib-rdma-core-installer-ubuntu.tar.gz
-
-    echo ""
-    echo "===== RDMA probe ====="
-    ls -la /usr/lib/x86_64-linux-gnu/libibverbs.so* 2>&1 | head -5 || echo "libibverbs.so NOT FOUND"
-    ls /sys/class/infiniband/ 2>&1 | head -10 || echo "/sys/class/infiniband empty"
-    which ibv_devinfo && ibv_devinfo 2>&1 | head -20 || echo "ibv_devinfo not in PATH"
-  ) || echo "[RDMA] 安装/探测出错, 已忽略(不中断训练)"
-fi
 
 # ── 仓库根目录 (workspace/example/ → 上溯 2 级) ──
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -65,9 +40,10 @@ export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 # Wall-OSS 用 repo 内 wall_x；清掉可能污染的 PYTHONPATH
 export PYTHONPATH="${REPO_DIR}"
 
-# ── wandb (PAI 内网) ──
+# ── wandb（可选；通过环境变量配置）──
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY 2>/dev/null || true
 if [[ "${WANDB_OFFLINE:-0}" != "1" && "${WANDB_OFFLINE:-}" != "true" ]]; then
+    # Set WANDB_BASE_URL / WANDB_API_KEY / WANDB_ENTITY if using a custom wandb server.
     export WANDB_BASE_URL="${WANDB_BASE_URL:-}"
     export WANDB_API_KEY="${WANDB_API_KEY:-}"
     export WANDB_ENTITY="${WANDB_ENTITY:-}"
