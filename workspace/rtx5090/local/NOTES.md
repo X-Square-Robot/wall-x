@@ -1,6 +1,6 @@
 # RTX 5090 推理机部署实测记录
 
-本文档记录 **2026-08-23** 在某台 **NVIDIA RTX 5090 / Ubuntu 24.04** 推理机上的实际安装与推理验证。路径配置见同目录 [`env.sh`](./env.sh)。
+本文档记录 **2026-08-23** 在某台 **NVIDIA RTX 5090 / Ubuntu 24.04** 推理机上的实际安装与推理验证。本机路径请复制 [`../env.example`](../env.example) 为 `local/env.sh` 后自行填写（`env.sh` 不纳入版本库）。
 
 通用部署流程见 [`../DEPLOY.md`](../DEPLOY.md)。
 

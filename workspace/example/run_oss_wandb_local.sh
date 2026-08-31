@@ -28,7 +28,7 @@ fi
 
 # ── conda 环境 ──
 CONDA_HOME="${CONDA_HOME:?Set CONDA_HOME to your miniconda root}"
-CONDA_ENV="${CONDA_ENV:-wallx_oss}"
+CONDA_ENV="${CONDA_ENV:-wallx}"
 source "${CONDA_HOME}/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV}"
 
