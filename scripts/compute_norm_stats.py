@@ -59,9 +59,9 @@ import yaml
 from numba import jit, prange
 from tqdm import tqdm
 
-SKIP_DOF_KEYS = frozenset(
-    {"velocity_decomposed", "height", "head_actions", "action_padding"}
-)
+# Match wall_x.data.backends.lerobot.rotation_layout.LAYOUT_SKIP_KEYS:
+# only virtual ``action_padding`` is absent from the on-disk vector.
+SKIP_DOF_KEYS = frozenset({"action_padding"})
 
 _GEOMETRY_FUNCS_LOADED = False
 
@@ -226,12 +226,31 @@ def _prepare_arrays_for_layout(
     """
     Match LeRobot training loader: convert 3D Euler slices to 6D when config
     uses rotation_6D keys but the dataset stores 14-dim Euler vectors.
+    Extra trailing DOFs beyond the active layout are truncated (e.g. when the
+    dataset still has velocity/height/head but training uses action_padding).
     """
     from wall_x.data.backends.lerobot.rotation_layout import (
         euler_layout_dim,
         layout_uses_6d_rotation,
         maybe_convert_euler_to_6d,
     )
+
+    expected_state_dim = layout_vector_dim(agent_pos_config)
+    expected_action_dim = layout_vector_dim(dof_config)
+    if states.shape[-1] > expected_state_dim:
+        logging.warning(
+            "Truncating state from %d to layout dim %d (dropping trailing DOFs)",
+            states.shape[-1],
+            expected_state_dim,
+        )
+        states = states[..., :expected_state_dim]
+    if actions.shape[-1] > expected_action_dim:
+        logging.warning(
+            "Truncating action from %d to layout dim %d (dropping trailing DOFs)",
+            actions.shape[-1],
+            expected_action_dim,
+        )
+        actions = actions[..., :expected_action_dim]
 
     convert_state = layout_uses_6d_rotation(agent_pos_config)
     convert_action = layout_uses_6d_rotation(dof_config)
@@ -264,8 +283,6 @@ def _prepare_arrays_for_layout(
                 f"{raw_dim} or 6D layout dim {target_dim} from dof_config"
             )
 
-    expected_state_dim = layout_vector_dim(agent_pos_config)
-    expected_action_dim = layout_vector_dim(dof_config)
     if states.shape[-1] != expected_state_dim:
         raise ValueError(
             f"State dim {states.shape[-1]} != expected layout dim {expected_state_dim}"
@@ -487,21 +504,37 @@ def _collect_relative_rotation(
     states: np.ndarray,
     index_range: list[int],
     action_chunk: int,
+    max_anchors: int = 50000,
 ) -> np.ndarray:
     """
     Per-anchor action chunk relative to anchor state (matches lerobot loader).
 
     Unlike cartesian relative, each anchor processes a full [chunk, dim] action
     clip against a single proprio rotation at the anchor frame.
+
+    Large datasets subsample anchors (uniform stride, capped by ``max_anchors``)
+    so q01/q99 stay stable without an O(N) Python loop over every frame.
     """
     start, end = index_range
     max_start = max(0, len(actions) - action_chunk)
     if max_start == 0:
         return np.empty((0, end - start), dtype=np.float32)
 
+    if max_start <= max_anchors:
+        anchor_indices = range(max_start)
+    else:
+        stride = int(np.ceil(max_start / max_anchors))
+        anchor_indices = range(0, max_start, stride)
+        logging.info(
+            "  relative rotation: subsample ~%d/%d anchors (stride=%d)",
+            (max_start + stride - 1) // stride,
+            max_start,
+            stride,
+        )
+
     chunks = []
     for anchor_idx in tqdm(
-        range(max_start),
+        anchor_indices,
         desc="  relative rotation anchors",
         leave=False,
     ):

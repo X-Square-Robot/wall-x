@@ -6,9 +6,10 @@ import numpy as np
 
 from wall_x._vendor.x2robot_utils.geometry import euler_to_matrix_zyx_6d_nb
 
-LAYOUT_SKIP_KEYS = frozenset(
-    {"velocity_decomposed", "height", "head_actions", "action_padding"}
-)
+# Only virtual tail padding is omitted from the on-disk LeRobot vector.
+# velocity / height / head_actions are real DOFs when present in the dataset
+# and must be copied through during Euler↔6D / relative conversion.
+LAYOUT_SKIP_KEYS = frozenset({"action_padding"})
 ROTATION_KEYWORD = "rotation"
 ROTATION_6D_KEYWORD = "6D"
 

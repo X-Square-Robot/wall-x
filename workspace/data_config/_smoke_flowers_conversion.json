@@ -1,0 +1,63 @@
+{
+  "output_path": "<path/to/data>/arrange_3_flowers_wrc_red_lerobot_smoke",
+  "repo_id": "arrange_3_flowers_wrc_red_smoke",
+  "fps": 20,
+  "src_path_list": [
+    "<path/to/x2robot_data>/smoke_collection"
+  ],
+  "episode_template": {
+    "type": "x2_normal",
+    "cam_mapping": {
+      "faceImg": "face_view",
+      "leftImg": "left_wrist_view",
+      "rightImg": "right_wrist_view"
+    },
+    "predict_action_keys": [
+      "follow_left_ee_cartesian_pos",
+      "follow_left_ee_rotation",
+      "follow_left_gripper",
+      "follow_right_ee_cartesian_pos",
+      "follow_right_ee_rotation",
+      "follow_right_gripper",
+      "height",
+      "head_actions"
+    ],
+    "obs_action_keys": [
+      "follow_left_ee_cartesian_pos",
+      "follow_left_ee_rotation",
+      "follow_left_gripper",
+      "follow_right_ee_cartesian_pos",
+      "follow_right_ee_rotation",
+      "follow_right_gripper",
+      "height",
+      "head_actions"
+    ]
+  },
+  "features": {
+    "observation.state": {
+      "dtype": "float32",
+      "shape": [23],
+      "names": null
+    },
+    "action": {
+      "dtype": "float32",
+      "shape": [23],
+      "names": null
+    },
+    "observation.images.faceImg": {
+      "dtype": "video",
+      "shape": [720, 1280, 3],
+      "names": ["height", "width", "channels"]
+    },
+    "observation.images.leftImg": {
+      "dtype": "video",
+      "shape": [480, 640, 3],
+      "names": ["height", "width", "channels"]
+    },
+    "observation.images.rightImg": {
+      "dtype": "video",
+      "shape": [480, 640, 3],
+      "names": ["height", "width", "channels"]
+    }
+  }
+}

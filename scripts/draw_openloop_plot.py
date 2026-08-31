@@ -863,6 +863,9 @@ async def run_openloop_eval(
             gt_full = np.asarray(episode.actions, dtype=np.float32)
             if gt_full.ndim == 1:
                 gt_full = gt_full[np.newaxis, :]
+            dof_cfg = _dof_config(train_config)
+            if dof_cfg:
+                gt_full = strip_padding_columns(gt_full, dof_cfg)
             pred_full = np.full_like(gt_full, np.nan)
             aligned_gt: list[list[float]] = []
             aligned_pred: list[list[float]] = []
