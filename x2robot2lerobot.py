@@ -61,9 +61,9 @@ Notes
 """
 
 import argparse
+import json
 import logging
 import os
-import json
 import re
 import shutil
 import tempfile
@@ -75,15 +75,14 @@ import numpy as np
 import pandas as pd
 import torch
 import torchvision
+from lerobot.datasets.compute_stats import compute_episode_stats
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.utils import validate_episode_buffer
 from numba import jit, prange
 from scipy import stats
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import savgol_filter
 from scipy.spatial.transform import Rotation as R
-
-from lerobot.datasets.compute_stats import compute_episode_stats
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.datasets.utils import validate_episode_buffer
 
 logger = logging.getLogger(__name__)
 

@@ -37,6 +37,11 @@ from wall_x.data.backends.lerobot.utils import (
     process_grounding_points,
     replace_action_token,
 )
+from wall_x.data.backends.lerobot.worker_rng import (
+    FLOW_TIMESTEP_TRAIN_STREAM,
+    FLOW_TIMESTEP_VALIDATION_STREAM,
+    WorkerNumpyRNG,
+)
 
 T_co = TypeVar("T_co", covariant=True)
 logger = logging.getLogger(__name__)
@@ -269,9 +274,7 @@ class PreprocessedDataset(Dataset[T_co]):
             if k not in RELATIVE_SKIP_KEYS
         )
         action_active = sum(
-            int(d)
-            for k, d in self._dof_config.items()
-            if k not in RELATIVE_SKIP_KEYS
+            int(d) for k, d in self._dof_config.items() if k not in RELATIVE_SKIP_KEYS
         )
         if state_active and agent_pos.shape[-1] > state_active:
             agent_pos = agent_pos[..., :state_active]
@@ -354,7 +357,12 @@ class PreprocessedDataset(Dataset[T_co]):
             sampler=sampler,  # Use distributed sampler instead of shuffle=True
             num_workers=num_workers,
             collate_fn=DataCollator(
-                self.config, self.dataload_config, self.norm_stats, self.lerobot_config
+                self.config,
+                self.dataload_config,
+                self.norm_stats,
+                self.lerobot_config,
+                rank=self.rank,
+                rng_stream=FLOW_TIMESTEP_TRAIN_STREAM,
             ),
             pin_memory=True,  # Enable for GPU training
             persistent_workers=num_workers > 0,  # Only if num_workers > 0
@@ -390,7 +398,12 @@ class PreprocessedDataset(Dataset[T_co]):
             sampler=sampler,
             num_workers=num_workers,
             collate_fn=DataCollator(
-                self.config, self.dataload_config, self.norm_stats, self.lerobot_config
+                self.config,
+                self.dataload_config,
+                self.norm_stats,
+                self.lerobot_config,
+                rank=self.rank,
+                rng_stream=FLOW_TIMESTEP_VALIDATION_STREAM,
             ),
             pin_memory=True,
             persistent_workers=num_workers > 0,
@@ -407,7 +420,9 @@ class DataCollator:
     _action_tokenizer_cache = {}
     _norm_stat_alignment_warnings = set()
 
-    def __init__(self, config, dataload_config, stats, lerobot_config):
+    def __init__(
+        self, config, dataload_config, stats, lerobot_config, rank=0, rng_stream=None
+    ):
         self.config = config
         self.dataload_config = dataload_config
         self.stats = stats
@@ -416,7 +431,9 @@ class DataCollator:
         self.state_min_stat = stats["state"].min
         self.state_delta = stats["state"].delta
         self.lerobot_config = lerobot_config
-        self.np_rng = np.random.default_rng()
+        if rng_stream is None:
+            raise ValueError("DataCollator requires an explicit RNG stream")
+        self.worker_rng = WorkerNumpyRNG(rank=rank, stream=rng_stream)
 
         noise_scheduler_config = config.get("noise_scheduler", {})
         self.beta_alpha = noise_scheduler_config.get(
@@ -676,9 +693,11 @@ class DataCollator:
             torch.Tensor: sampled timesteps with shape [batch_size]
         """
 
-        sample_np = self.np_rng.beta(
-            self.beta_alpha, self.beta_beta, size=(batch_size,)
-        ).astype(np.float32)
+        sample_np = (
+            self.worker_rng.generator()
+            .beta(self.beta_alpha, self.beta_beta, size=(batch_size,))
+            .astype(np.float32)
+        )
         sample = torch.from_numpy(sample_np).to(
             device=device, dtype=dtype, non_blocking=True
         )
