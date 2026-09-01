@@ -274,9 +274,7 @@ class PreprocessedDataset(Dataset[T_co]):
             if k not in RELATIVE_SKIP_KEYS
         )
         action_active = sum(
-            int(d)
-            for k, d in self._dof_config.items()
-            if k not in RELATIVE_SKIP_KEYS
+            int(d) for k, d in self._dof_config.items() if k not in RELATIVE_SKIP_KEYS
         )
         if state_active and agent_pos.shape[-1] > state_active:
             agent_pos = agent_pos[..., :state_active]
