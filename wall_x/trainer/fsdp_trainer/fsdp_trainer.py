@@ -113,6 +113,13 @@ class FSDPTrainer(DistributedTrainer):
                 {"ckpt": self.cfg.checkpoint.resume_from},
             )
 
+        # When resuming from a training-checkpoint directory, resize the model
+        # vocab to match the checkpoint BEFORE FSDP wrapping. Otherwise the
+        # shards are created at the processor vocab size and
+        # set_model_state_dict fails on load.
+        if self._resume_from_training_checkpoint():
+            self._resize_model_to_checkpoint_vocab()
+
         self._wrap_model(self.model)
         self._create_optimizer()
         self._create_scheduler()
@@ -897,6 +904,47 @@ class FSDPTrainer(DistributedTrainer):
     def _resume_from_single_file(self) -> bool:
         path = self.cfg.checkpoint.resume_from
         return bool(path) and str(path).endswith((".safetensors", ".pth"))
+
+    def _resize_model_to_checkpoint_vocab(self) -> None:
+        """Resize model embeddings to match checkpoint vocab before FSDP wrap."""
+        import os
+
+        from safetensors import safe_open
+
+        ckpt_path = self.cfg.checkpoint.resume_from
+        weights = os.path.join(ckpt_path, "model.safetensors")
+        if not os.path.exists(weights):
+            return
+        embed_keys = (
+            "model.embed_tokens.weight",
+            "model.language_model.model.embed_tokens.weight",
+            "model.model.embed_tokens.weight",
+            "lm_head.weight",
+        )
+        ckpt_vocab = None
+        with safe_open(weights, framework="pt", device="cpu") as f:
+            available = set(f.keys())
+            for k in embed_keys:
+                if k in available:
+                    ckpt_vocab = f.get_slice(k).get_shape()[0]
+                    break
+        if ckpt_vocab is None:
+            return
+        cur_vocab = self.model.get_input_embeddings().weight.shape[0]
+        if cur_vocab == ckpt_vocab:
+            return
+        self.logger.info(
+            "resize_token_embeddings from %d to %d to match checkpoint %s",
+            cur_vocab,
+            ckpt_vocab,
+            ckpt_path,
+        )
+        if hasattr(self.model, "resize_token_embeddings"):
+            self.model.resize_token_embeddings(ckpt_vocab)
+        elif hasattr(self.model, "model") and hasattr(
+            self.model.model, "resize_token_embeddings"
+        ):
+            self.model.model.resize_token_embeddings(ckpt_vocab)
 
     def _resume_from_training_checkpoint(self) -> bool:
         path = self.cfg.checkpoint.resume_from
