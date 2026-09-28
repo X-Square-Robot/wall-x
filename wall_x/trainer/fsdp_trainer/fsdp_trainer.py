@@ -604,6 +604,18 @@ class FSDPTrainer(DistributedTrainer):
                     self.timers("interval-time", log_level=0).start(barrier=True)
                     self.timers("data-load", log_level=0).start(barrier=True)
 
+        # The loop increments global_step after each optimizer step. When a run
+        # ends exactly on a save/validation interval, that boundary is reached
+        # only after the last iteration's in-loop checks.
+        if (
+            self.num_training_steps > 0
+            and self.global_step >= self.num_training_steps
+        ):
+            if self._should_save_checkpoint():
+                self.save_checkpoint(epoch, self.global_step)
+            if self._should_validate():
+                self.val_loop()
+
         # Re-enable automatic GC after training loop
         gc.enable()
 
