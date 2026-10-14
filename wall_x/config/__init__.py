@@ -6,6 +6,7 @@ from .hyperparams_config import (
     ConstantSchedulerConfig,
     CosineSchedulerConfig,
     DMuonConfig,
+    NaiveFSDP2MuonConfig,
     OptimizerConfig,
     SchedulerConfig,
     StepSchedulerConfig,
@@ -14,8 +15,11 @@ from .hyperparams_config import (
 from .infra_config import (
     CheckpointConfig,
     DebugConfig,
+    DMuonBackendConfig,
     DistributedConfig,
+    FSDPBackendConfig,
     LoggingConfig,
+    ShardedBackendConfig,
 )
 from .loader import load_config, save_config
 from .model_config import ModelConfig, QActModelConfig
@@ -43,11 +47,15 @@ __all__ = [
     "OptimizerConfig",
     "AdamWConfig",
     "DMuonConfig",
+    "NaiveFSDP2MuonConfig",
     "SchedulerConfig",
     "CosineSchedulerConfig",
     "ConstantSchedulerConfig",
     "StepSchedulerConfig",
     # Infra configs
+    "ShardedBackendConfig",
+    "FSDPBackendConfig",
+    "DMuonBackendConfig",
     "DistributedConfig",
     "LoggingConfig",
     "CheckpointConfig",

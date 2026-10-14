@@ -1,3 +1,5 @@
+import hashlib
+import json
 import logging
 import math
 import os
@@ -14,9 +16,65 @@ from transformers import AutoProcessor
 
 from wall_x.model.core.action.normalizer import Normalizer
 from wall_x.model.qact.tokenizer_mixin import get_action_tokenizer_mixin
-from wall_x.utils.metrics import dtw_distance, frechet_distance, get_action_accuracy
+from wall_x.utils.metrics import get_action_accuracy, dtw_distance, frechet_distance
 
 _logger = logging.getLogger(__name__)
+
+_WALL_VLM_RVQ_TOKENIZERS = {
+    "wall_vlm_rvq_v3_2",
+    "wall_vlm_rvq_v3_3_ar",
+}
+
+
+def _stamp_rvq_token_manifest(processor, action_mapper):
+    """Record the exact RVQ token-to-ID contract for bootstrap and strict runs."""
+    geometry = action_mapper["rvq_tokenizer_geometry"]
+    tokens = ["<rvq_start>"] + [
+        f"<rvq_r{q}_{idx}>"
+        for q in range(int(geometry["num_quantizers"]))
+        for idx in range(int(geometry["codebook_size"]))
+    ]
+    ids = [int(processor.tokenizer.convert_tokens_to_ids(token)) for token in tokens]
+    if len(ids) != len(set(ids)):
+        raise ValueError("RVQ manifest tokens must map to distinct token IDs")
+    manifest = "\n".join(f"{token}\t{token_id}" for token, token_id in zip(tokens, ids))
+    manifest_hash = hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+    action_mapper["rvq_token_id_manifest_hash"] = manifest_hash
+    return manifest_hash
+
+
+def _validate_wall_vlm_checkpoint_contract(processor_path, processor, action_mapper):
+    from wall_x.model.qact.rvq_position import validate_rvq_tokenizer_geometry
+
+    config_path = os.path.join(os.fspath(processor_path), "config.json")
+    if not os.path.isfile(config_path):
+        raise ValueError(
+            "wall_vlm_rvq_v3_2 requires the Wall-VLM checkpoint config at "
+            f"{config_path}"
+        )
+    with open(config_path) as stream:
+        saved = json.load(stream)
+    if saved.get("rvq_position_encoding") != "time_level_2d":
+        raise ValueError(
+            "Wall-VLM checkpoint must declare " "rvq_position_encoding='time_level_2d'"
+        )
+    geometry = action_mapper["rvq_tokenizer_geometry"]
+    validate_rvq_tokenizer_geometry(
+        saved.get("rvq_tokenizer_geometry"),
+        geometry,
+        context="the Wall-VLM checkpoint",
+    )
+    current_manifest_hash = _stamp_rvq_token_manifest(processor, action_mapper)
+    saved_manifest_hash = saved.get("rvq_token_id_manifest_hash")
+    if saved_manifest_hash is None:
+        raise ValueError(
+            "Wall-VLM checkpoint has no rvq_token_id_manifest_hash metadata"
+        )
+    if saved_manifest_hash != current_manifest_hash:
+        raise ValueError(
+            "Wall-VLM checkpoint RVQ token IDs differ from the current tokenizer: "
+            f"saved={saved_manifest_hash}, current={current_manifest_hash}"
+        )
 
 
 def load_wallx_processors(
@@ -42,7 +100,16 @@ def load_wallx_processors(
             - num_added_tokens: number of added tokens
             - tokenizer_mixin: ActionTokenizerMixin instance
     """
-    processor = AutoProcessor.from_pretrained(config["processor_path"], use_fast=True)
+    processor_path = config["processor_path"]
+    from wall_x.model.qact.qwen3_5.dino_processor import (
+        is_dino_processor_checkpoint,
+        load_dino_qwen35_processor,
+    )
+
+    if is_dino_processor_checkpoint(processor_path):
+        processor = load_dino_qwen35_processor(processor_path)
+    else:
+        processor = AutoProcessor.from_pretrained(processor_path, use_fast=True)
     # pad side = left
     processor.tokenizer.padding_side = "left"
 
@@ -71,14 +138,32 @@ def load_wallx_processors(
         action_tokenizer_config.setdefault(
             "action_tokenizer_config_dir", config.get("action_tokenizer_config_dir")
         )
+        action_tokenizer_config.setdefault(
+            "rvq_token_layout", config.get("rvq_token_layout", "layer_major")
+        )
+        action_tokenizer_config.setdefault(
+            "rvq_position_encoding",
+            config.get("rvq_position_encoding", "time_level_2d"),
+        )
+        action_tokenizer_config.setdefault(
+            "rvq_checkpoint_contract",
+            config.get("rvq_checkpoint_contract", "strict"),
+        )
         # Pass action_horizon_ar to the tokenizer for DLLM.
         data_config = config.get("data", {})
         action_tokenizer_config.setdefault(
-            "action_horizon_ar", data_config.get("action_horizon_ar", 32)
+            "action_horizon_ar",
+            config.get("rvq_action_horizon")
+            or data_config.get("action_horizon_ar", 32),
         )
         # Fall back to dof_config when ar_dof_config is not provided.
         ar_dof_config = config.get("ar_dof_config") or config.get("dof_config")
         assert ar_dof_config is not None, "Missing ar_dof_config and dof_config"
+        # v3.3-ar mixin needs wall-x layout keys (not tokenizer profile roles/forms).
+        action_tokenizer_config.setdefault("ar_dof_config", ar_dof_config)
+        action_tokenizer_config.setdefault(
+            "agent_pos_config", config.get("agent_pos_config")
+        )
         if normalizer is None:
             if action_statistic_dof is None:
                 raise ValueError(
@@ -96,6 +181,27 @@ def load_wallx_processors(
 
         # Collect special tokens.
         _new_tokens, special_tokens = tokenizer_mixin.get_all_special_tokens()
+        if action_tokenizer_type in _WALL_VLM_RVQ_TOKENIZERS:
+            if config.get("rvq_token_protocol") != "wall_vlm_start_v1":
+                raise ValueError(
+                    f"{action_tokenizer_type} requires "
+                    "rvq_token_protocol='wall_vlm_start_v1'"
+                )
+            known_vocab = processor.tokenizer.get_vocab()
+            missing = [token for token in _new_tokens if token not in known_vocab]
+            checkpoint_contract = config.get("rvq_checkpoint_contract", "strict")
+            if checkpoint_contract == "strict" and missing:
+                raise ValueError(
+                    "Wall-VLM processor/tokenizer is missing pretrained RVQ tokens: "
+                    f"{missing[:8]} (missing={len(missing)}). Set processor_path to "
+                    "the Wall-VLM checkpoint processor."
+                )
+            if checkpoint_contract == "bootstrap" and not missing:
+                _logger.warning(
+                    "RVQ bootstrap was requested, but the processor already contains "
+                    "all action tokens; use rvq_checkpoint_contract='strict' when "
+                    "continuing an action-trained checkpoint"
+                )
         new_tokens += _new_tokens
 
         # Add tokens to the vocabulary.
@@ -126,6 +232,17 @@ def load_wallx_processors(
 
         # Build action_mapper.
         action_mapper = tokenizer_mixin.build_action_mapper(processor)
+        if action_tokenizer_type in _WALL_VLM_RVQ_TOKENIZERS:
+            # Bootstrap checkpoints have no saved RVQ metadata to validate, but
+            # the newly-created vocabulary still needs a stable manifest hash.
+            _stamp_rvq_token_manifest(processor, action_mapper)
+        if (
+            action_tokenizer_type in _WALL_VLM_RVQ_TOKENIZERS
+            and config.get("rvq_checkpoint_contract", "strict") == "strict"
+        ):
+            _validate_wall_vlm_checkpoint_contract(
+                processor_path, processor, action_mapper
+            )
 
         # Fetch the underlying tokenizer.
         train_action_tokenizer = tokenizer_mixin.tokenizer
@@ -225,18 +342,20 @@ def update_model_config(train_config, model_config):
         "action_horizon_flow", 32
     )
 
-    if train_config.get("_attn_implementation", None) is not None:
-        model_config._attn_implementation = train_config["_attn_implementation"]
+    attn_impl = train_config.get(
+        "_attn_implementation", train_config.get("attn_implementation")
+    )
+    if attn_impl is not None:
+        model_config._attn_implementation = attn_impl
 
-    if train_config.get("attn_deterministic", None) is not None:
-        model_config.attn_deterministic = train_config["attn_deterministic"]
-        model_config.vision_config.attn_deterministic = train_config[
-            "attn_deterministic"
-        ]
+    # attn_deterministic is no longer a standalone knob — it is derived from the
+    # single ``hyperparams.deterministic_algorithms`` switch so "turn determinism
+    # on" enables all paths (incl. attention kernels) at once (MR !556 review).
+    _det = train_config.get("hyperparams", {}).get("deterministic_algorithms", False)
+    model_config.attn_deterministic = _det
+    model_config.vision_config.attn_deterministic = _det
+    if _det:
         _logger.info("Attention is using deterministic kernel for this run")
-    else:
-        model_config.attn_deterministic = True
-        model_config.vision_config.attn_deterministic = True
 
     if train_config.get("noise_scheduler", None) is not None:
         model_config.noise_scheduler = train_config["noise_scheduler"]
@@ -281,14 +400,49 @@ def print_rank_last(message):
         _logger.info(message)
 
 
-def seed_all(seed):
+def seed_all(seed, deterministic_algorithms: bool = False):
+    """Seed RNGs; opt into strong determinism via ``deterministic_algorithms``.
+
+    Strong determinism (deterministic algorithms + cudnn.deterministic + the
+    cublas workspace pin) inserts fill/elementwise kernels and disables the cudnn
+    autotuner, measurably lowering training MFU. Default is performance mode;
+    enable it only for bitwise-reproducible experiments via the yaml switch
+    ``hyperparams.deterministic_algorithms`` — the single determinism knob, with
+    no environment-variable override. See docs qwen35_mfu_report.
+    """
+    # RNG seed 不算「确定性算法」——任何 run 都需要 seed，否则 random op 不可复现。
+    # 这部分跟 flag 无关，永远调。
     np.random.seed(seed)
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
     os.environ["PYTHONHASHSEED"] = str(seed)
+
+    if deterministic_algorithms:
+        # 严格确定性套餐：cudnn 锁 deterministic kernel + benchmark 关 + torch 全 op 走
+        # 确定性实现。same-seed + same-yaml 两次 run 的 step 0 forward
+        # byte-equal、grad 单步 drift < 1e-3。唯一开关是 yaml 的
+        # hyperparams.deterministic_algorithms（无环境变量旁路）。
+        # CUBLAS_WORKSPACE_CONFIG 只 setdefault 兜底——launch 脚本显式 export 的值
+        # 优先；不设则 PyTorch 第一个 cuBLAS 调用就 raise RuntimeError。
+        # warn_only=True 内置：bf16 训练里总有几个 op 没确定实现（如某些 scatter_add
+        # 路径），warn 比 crash 实用——拿大部分 deterministic 收益即可。
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    else:
+        # perf 套餐：cudnn 自由选最快 algo（含 nondet variant），但 benchmark 不默认开：
+        # benchmark=True 对每个新 conv 配置做一轮算法竞速，动态 shape 负载（如 Qwen3.5
+        # vision Conv3d patch_embed）几乎每步撞新 shape、反复付竞速成本，step time 3.2x
+        # 回退（TR-017 实测 MFU 37.7%→11.7%）。固定 shape 负载（如 LIBERO 224
+        # 输入）warm-up 一次后收益为正——已实测过收益的固定 shape 场景可用
+        # WALLX_CUDNN_BENCHMARK=1 显式开启，不走全局默认。
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = os.environ.get(
+            "WALLX_CUDNN_BENCHMARK", "0"
+        ).lower() in ("1", "true")
+        torch.use_deterministic_algorithms(False)
 
 
 def save_text_results_to_file(
@@ -423,7 +577,7 @@ def compute_action_metrics(all_preds, all_actions, config, step_log={}):
     return step_log
 
 
-def get_warmup_cosine_schedule(
+def get_openpi_cosine_schedule_with_warmup(
     optimizer,
     num_warmup_steps: int,
     num_training_steps: int,
@@ -432,7 +586,7 @@ def get_warmup_cosine_schedule(
     last_epoch: int = -1,
 ):
     """
-    Create a schedule with linear warmup followed by cosine decay:
+    Create a schedule with a learning rate that follows OpenPI style:
     - Warmup: linearly increases from peak_lr/(warmup_steps+1) to peak_lr
     - Decay: cosine decay from peak_lr to end_lr
 
@@ -454,7 +608,7 @@ def get_warmup_cosine_schedule(
 
     def lr_lambda(current_step: int):
         if current_step < num_warmup_steps:
-            # Start from peak_lr / (warmup_steps + 1).
+            # OpenPI warmup: start from peak_lr / (warmup_steps + 1)
             init_lr = peak_lr / (num_warmup_steps + 1)
             current_lr = init_lr + (peak_lr - init_lr) * current_step / num_warmup_steps
             return current_lr / peak_lr  # LambdaLR multiplies by base_lr
@@ -476,6 +630,8 @@ def plot_openloop(
     episode_index,
     save_path,
     is_static_list=None,
+    dim_labels=None,
+    skip_all_nan=False,
 ):
     """
     Plot openloop action comparison visualization.
@@ -487,6 +643,12 @@ def plot_openloop(
         episode_index: Index of the episode being visualized
         save_path: Directory path to save the plot
         is_static_list: Optional list of booleans indicating static frames
+        dim_labels: Optional per-dim subplot names (e.g. ``left_x`` /
+            ``left_gripper`` / ``left_thumb_cmc_abduction``). Each subplot title
+            is this name; falls back to ``Action Dimension i`` when not given.
+        skip_all_nan: When True, drop dims whose L1 is all-NaN (padded DOF such
+            as a dexterous hand's gripper or vendor-absent joints) so they don't
+            add empty subplots.
     """
     import matplotlib
 
@@ -498,10 +660,16 @@ def plot_openloop(
     ), "Predicted action and ground truth action must have the same shape."
 
     dim = action_pred_list[0].shape[1]
-    plt.figure(figsize=(12, 4 * dim))
+    dims = list(range(dim))
+    if skip_all_nan:
+        dims = [i for i in dims if np.any(~np.isnan(l1_loss[:, i]))]
+    if not dims:
+        return
+    n = len(dims)
+    plt.figure(figsize=(12, 4 * n))
 
-    for i in range(dim):
-        plt.subplot(dim, 1, i + 1)
+    for sp, i in enumerate(dims):
+        plt.subplot(n, 1, sp + 1)
 
         has_labeled_static = False
         for j in range(len(action_gt_list)):
@@ -559,13 +727,33 @@ def plot_openloop(
                     markersize=4,
                 )
 
-        plt.title(f"Action Dimension {i + 1}, L1 Loss: {l1_loss[:, i].mean():.6f}")
-        plt.xlabel("Number of Chunk")
+        # Mark chunk boundaries: each chunk is an INDEPENDENT open-loop
+        # re-prediction (new observation + freshly sampled flow noise), so the
+        # curve legitimately jumps at integer x. The line within [j, j+1] is one
+        # chunk's full action_horizon-step prediction, not overlaid per-frame.
+        for b in range(1, len(action_gt_list)):
+            plt.axvline(
+                b,
+                color="green",
+                linestyle=":",
+                alpha=0.35,
+                linewidth=1,
+                label="Chunk boundary" if b == 1 else None,
+            )
+
+        name = (
+            dim_labels[i]
+            if dim_labels is not None and i < len(dim_labels)
+            else f"Action Dimension {i + 1}"
+        )
+        plt.title(f"{name}, L1 Loss: {np.nanmean(l1_loss[:, i]):.6f}")
+        plt.xlabel("Chunk index (each unit = one action_horizon prediction)")
         plt.ylabel("Action Value")
         plt.legend()
 
     plt.suptitle(
-        f"Openloop Action Comparison for Episode {episode_index}, L1 Loss: {l1_loss.mean():.6f}"
+        f"Openloop Action Comparison for Episode {episode_index}, "
+        f"L1 Loss: {np.nanmean(l1_loss):.6f}"
     )
     plt.tight_layout(rect=[0, 0, 1, 0.98])
     os.makedirs(save_path, exist_ok=True)

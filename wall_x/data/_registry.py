@@ -96,7 +96,7 @@ class MissingOperationError(NotImplementedError):
             hint = f"Supported by: {impls}."
         else:
             hint = (
-                f"No registered backend implements {op_name!r} - check the "
+                f"No registered backend implements {op_name!r} — check the "
                 f"spelling or add it to the backend module."
             )
         super().__init__(
@@ -179,7 +179,7 @@ def resolve_dataset_type(cfg_or_yaml: Any, default: str = "lerobot") -> str:
 def build_data(cfg: Any, ctx: BuildContext) -> DataBundle:
     """Dispatch ``backend.build(cfg, ctx)`` to the backend named by cfg.
 
-    ``cfg`` is expected to be a typed :class:`TrainConfig` - that's what
+    ``cfg`` is expected to be a typed :class:`TrainConfig` — that's what
     ``wall_x.config.load_config`` returns and what every trainer entry
     point passes in. Raw yaml dicts are not supported here on purpose:
     the typed schema is the contract that gives backends their
@@ -198,10 +198,10 @@ def build_data(cfg: Any, ctx: BuildContext) -> DataBundle:
 
 
 def _set_data_backend(name: str) -> None:
-    """Internal - only config loaders should call this.
+    """Internal — only config loaders should call this.
 
     Strict semantics: first call wins; same-value re-set is a no-op;
-    different-value re-set raises. The error is loud on purpose - it means
+    different-value re-set raises. The error is loud on purpose — it means
     two config loaders disagreed about which backend to use, which is
     almost always a bug (e.g. business code calling this directly, or two
     yamls being loaded in the same process).
@@ -222,7 +222,7 @@ def _set_data_backend(name: str) -> None:
 
 
 def _reset_data_backend() -> None:
-    """Internal - clear the active backend. Tests only."""
+    """Internal — clear the active backend. Tests only."""
     global _DATA_BACKEND
     _DATA_BACKEND = None
 
@@ -236,7 +236,7 @@ def data_backend() -> _BackendProxy:
     """Return the active backend proxy. Raises if no config has been loaded.
 
     Direct construction of ``TrainConfig(...)`` does **not** register a
-    backend - that's intentional. Business code must go through
+    backend — that's intentional. Business code must go through
     :func:`wall_x.config.load_config`, which registers the backend before
     returning.
     """

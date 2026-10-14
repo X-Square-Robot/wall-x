@@ -1,6 +1,5 @@
-from typing import List
-
 import torch
+from typing import List
 
 
 def get_action_accuracy(

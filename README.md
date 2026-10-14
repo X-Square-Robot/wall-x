@@ -69,22 +69,39 @@ export FLASH_ATTN_CUDA_ARCHS=$(python -c 'import torch; print(f"{torch.cuda.get_
 MAX_JOBS=4 pip install flash-attn==2.8.3 --no-build-isolation
 ```
 
+Qwen3.5 models also use `causal-conv1d` for the linear-attention layers
+(`flash-linear-attention` is already in `requirements.txt`):
+
+```bash
+MAX_JOBS=8 pip install causal-conv1d==1.6.2.post1 --no-build-isolation
+```
+
+Both packages compile CUDA code when no matching prebuilt wheel is available.
+The `nvcc` on `PATH` must match the CUDA version of the installed torch
+(12.8 for `torch==2.10.0`). If the system CUDA toolkit differs, install a
+matching compiler into the conda environment first:
+
+```bash
+conda install -c nvidia -c conda-forge cuda-nvcc-impl=12.8 cuda-nvcc-tools=12.8 cuda-cudart-dev=12.8 cuda-version=12.8
+export CUDA_HOME=$CONDA_PREFIX
+export CPATH=$CONDA_PREFIX/targets/x86_64-linux/include:$(python -c 'import glob, nvidia, os; print(":".join(glob.glob(os.path.join(nvidia.__path__[0], "*", "include"))))')
+```
+
 Install DMuon, which is used by the default training configs:
 
 ```bash
 pip install "dmuon @ git+https://github.com/X-Square-Robot/dmuon.git"
 ```
 
-Install LeRobot:
+Install LeRobot (0.4.4 reads LeRobot v3.0 datasets):
 
 ```bash
-git clone https://github.com/huggingface/lerobot.git
-cd lerobot
-pip install --no-deps -e .
+pip install --no-deps lerobot==0.4.4
 ```
 
 Use `--no-deps` for LeRobot so it does not override the Wall-X dependency
-versions installed from `requirements.txt`.
+versions installed from `requirements.txt`; the LeRobot runtime packages Wall-X
+needs are already listed there.
 
 Install Wall-X:
 
@@ -167,6 +184,28 @@ bash scripts/run_serving.sh \
 The wrapper has no built-in checkpoint path. It returns raw model action chunks
 by default, which is suitable for open-loop evaluation. Pass
 `--serialize-actions` for clients that expect robot-serialized actions.
+
+For a dual-arm desktop robot, add `--robot-type desktop --serialize-actions`.
+Each msgpack request carries:
+
+- `state`: `follow1_pos` / `follow2_pos` (left / right arm end-effector pose,
+  7 values each: xyz, roll-pitch-yaw, gripper)
+- `views`: base64-encoded JPEG images for `camera_front`, `camera_left`, and
+  `camera_right`
+- `instruction`: the task prompt
+
+The response contains `follow1_pos` / `follow2_pos` as absolute poses with
+shape `(action_horizon + 1, 7)`; row 0 is the input state. If the checkpoint
+was trained on end-effector deltas expressed in the current gripper frame, set
+`data.relative_action_frame: body` in the training config (the default `base`
+adds deltas in the robot base frame).
+
+`workspace/example/desktop/qwen3_5_2B_desktop.yml` is a complete dual-arm
+desktop config for a Qwen3.5-2B checkpoint. The prompt text is configurable
+through `data.system_prompt` (the system message) and `data.instruction_label`
+(the label before the task text, default `Instruction`). LeRobot training and
+inference read the same keys, so set them to whatever the checkpoint was
+trained with.
 
 ### Open-Loop WebSocket Evaluation
 

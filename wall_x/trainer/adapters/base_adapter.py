@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import os
 from abc import ABC, abstractmethod
@@ -10,6 +11,33 @@ from tqdm import tqdm
 from wall_x.trainer.utils import move_batch_to_device
 
 logger = logging.getLogger(__name__)
+
+
+def _distributed_union_keys(local_keys):
+    keys = sorted(str(key) for key in local_keys)
+    if not (dist.is_available() and dist.is_initialized()):
+        return keys
+    world_size = dist.get_world_size()
+    if world_size <= 1:
+        return keys
+    gathered = [None for _ in range(world_size)]
+    dist.all_gather_object(gathered, keys)
+    union = set()
+    for rank_keys in gathered:
+        if isinstance(rank_keys, (list, tuple)):
+            union.update(str(key) for key in rank_keys)
+    return sorted(union)
+
+
+def _channel_stats_device(*mappings):
+    for mapping in mappings:
+        if isinstance(mapping, dict):
+            for value in mapping.values():
+                if torch.is_tensor(value):
+                    return value.device
+    if torch.cuda.is_available():
+        return torch.device("cuda", torch.cuda.current_device())
+    return torch.device("cpu")
 
 
 def load_trainer_data_config(cfg):
@@ -45,7 +73,6 @@ class ModelAdapter(ABC):
         extract_loss            -- extract scalar loss from model outputs
 
     Concrete methods with default behaviour (override when needed):
-        load_step_and_epoch     -- restore global_step / epoch from checkpoint
         log_model_info          -- log model-specific info (no-op)
         collect_output_stats    -- collect auxiliary loss / accuracy stats (no-op)
         collect_param_norms     -- compute per-group param L2 norms (no-op)
@@ -117,22 +144,6 @@ class ModelAdapter(ABC):
         """
         ...
 
-    def load_step_and_epoch(self, checkpoint_path: str, is_incomplete_epoch: bool):
-        global_step = 0
-        start_epoch = 0
-
-        global_step_path = os.path.join(checkpoint_path, "global_step.pth")
-        if os.path.exists(global_step_path):
-            global_step = torch.load(global_step_path)["global_step"]
-
-        current_epoch_path = os.path.join(checkpoint_path, "current_epoch.pth")
-        if os.path.exists(current_epoch_path):
-            start_epoch = torch.load(current_epoch_path)["current_epoch"]
-            if not is_incomplete_epoch:
-                start_epoch = start_epoch + 1
-
-        return {"global_step": global_step, "start_epoch": start_epoch}
-
     # ---- forward / loss ----
     @abstractmethod
     def forward(self, model, batch, **kwargs):
@@ -181,16 +192,16 @@ class ModelAdapter(ABC):
         per-dataset channel losses, and action accuracy metrics from
         the model outputs and merges them into *step_stats* in-place.
 
-        This is an optional hook - subclasses override it when their
+        This is an optional hook — subclasses override it when their
         output format carries extra fields.  The default implementation
         is a no-op.
 
         Args:
             outputs:          raw model outputs (dict or object).
             step_stats:       dict being built by the trainer; mutated in-place.
-            reduce_tensor_fn: callable(tensor, average=True) -> scalar tensor,
+            reduce_tensor_fn: callable(tensor, average=True) → scalar tensor,
                               wraps dist.all_reduce for the current parallelism.
-            true_gather_fn:   callable(tensor) -> scalar | None,
+            true_gather_fn:   callable(tensor) → scalar | None,
                               gathers a value to rank-0 (returns None on
                               non-main ranks or when input is None).
             tokenizer_mixin:  optional ActionTokenizerMixin used to retrieve
@@ -204,10 +215,10 @@ class ModelAdapter(ABC):
         """Compute per-group parameter L2 norms and merge into step_stats.
 
         Groups parameters by name keyword:
-          - "visual"  -> visual_param_norm
-          - "action"  -> action_expert_param_norm
-          - (others)  -> org_vlm_param_norm
-          - all       -> total_param_norm
+          - "visual"  → visual_param_norm
+          - "action"  → action_expert_param_norm
+          - (others)  → org_vlm_param_norm
+          - all       → total_param_norm
 
         When parameters are sharded across ranks (FSDP FULL_SHARD /
         HYBRID_SHARD), the local squared-sum is partial and must be
@@ -215,13 +226,13 @@ class ModelAdapter(ABC):
         When parameters are replicated (DDP, or FSDP with SHARD_GRAD_OP /
         NO_SHARD), all_reduce would inflate the result by world_size.
 
-        This is an optional hook - the default implementation is a no-op.
+        This is an optional hook — the default implementation is a no-op.
 
         Args:
             model:            the (possibly FSDP/DDP-wrapped) model.
             step_stats:       dict being built by the trainer; mutated in-place.
             device:           torch.device for tensor allocation.
-            reduce_tensor_fn: callable(tensor, average=False) -> tensor,
+            reduce_tensor_fn: callable(tensor, average=False) → tensor,
                               wraps dist.all_reduce for the current parallelism.
             params_sharded:   True when parameters are actually sharded across
                               ranks (FSDP FULL_SHARD / HYBRID_SHARD).
@@ -286,7 +297,8 @@ class ModelAdapter(ABC):
         model,
         *,
         device,
-        use_fsdp: bool,
+        use_fsdp: bool | None = None,
+        backend: str | None = None,
         log_fn=None,
     ):
         """Prepare *model* dtype + placement before FSDP/DDP wrap.
@@ -294,14 +306,32 @@ class ModelAdapter(ABC):
         FSDP path: cast to fp32 on device; MixedPrecision policy handles the
         bf16 compute cast at forward time.  DDP path: delegate to the model's
         ``convert_to_mix_precision`` method (manual bf16 conversion, since
-        DDP has no equivalent of MixedPrecision), then move to device.
+        DDP has no equivalent of MixedPrecision), then move to device. Pure
+        DMuon has its own forward dtype policy and must not rely on FSDP2
+        MixedPrecision hooks.
 
         Adapters that handle placement themselves may override this hook.
         """
         _log = log_fn or (lambda _msg: None)
-        if use_fsdp:
+        if backend is None:
+            backend = "fsdp2" if use_fsdp else "ddp"
+
+        if backend == "fsdp2":
             model.to(dtype=torch.float32)
             _log("FSDP mode: all params fp32, MixedPrecision handles bf16 compute")
+            model.to(device)
+        elif backend == "dmuon":
+            if hasattr(model, "convert_to_pure_dmuon_mix_precision"):
+                model.convert_to_pure_dmuon_mix_precision()
+                _log(
+                    "Pure DMuon mode: model applied explicit live forward dtype policy"
+                )
+            else:
+                model.to(dtype=torch.float32)
+                _log(
+                    "Pure DMuon mode: all params fp32; no model-specific live dtype "
+                    "policy is defined"
+                )
             model.to(device)
         else:
             model.convert_to_mix_precision()
@@ -423,7 +453,7 @@ class ModelAdapter(ABC):
         """Run an inference loop for the given ``prediction_type``.
 
         Subclasses implement the dispatch table (flow_action / ar_action /
-        dllm_action / text / ...). Default raises - only VLAdapter has
+        dllm_action / text / ...). Default raises — only VLAdapter has
         meaningful predict paths today.
         """
         raise NotImplementedError(
@@ -459,36 +489,80 @@ def collect_channel_loss_stats(outputs, prefix="", tokenizer_mixin=None):
     model output dict lacks ``channel_loss_dict``.
     """
     stats = {}
-    channel_loss_dict = (
-        outputs.get("channel_loss_dict")
-        if isinstance(outputs, dict)
-        else getattr(outputs, "channel_loss_dict", None)
-    )
-    if channel_loss_dict is None:
+
+    def output_field(name):
+        return (
+            outputs.get(name)
+            if isinstance(outputs, dict)
+            else getattr(outputs, name, None)
+        )
+
+    channel_loss_dict = output_field("channel_loss_dict") or {}
+    channel_loss_count_dict = output_field("channel_loss_count_dict") or {}
+    if not channel_loss_dict and not (dist.is_available() and dist.is_initialized()):
         return stats
-    channel_loss_count_dict = (
-        outputs.get("channel_loss_count_dict")
-        if isinstance(outputs, dict)
-        else getattr(outputs, "channel_loss_count_dict", None)
-    )
-    for dataset_name_i in channel_loss_dict:
-        count_tensor = channel_loss_count_dict[dataset_name_i].clone()
-        loss_tensor = channel_loss_dict[dataset_name_i].detach().clone()
-        dist.all_reduce(count_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+
+    local_channel_keys = sorted(channel_loss_dict.keys())
+    if dist.is_available() and dist.is_initialized():
+        gathered_channel_keys = [None] * dist.get_world_size()
+        dist.all_gather_object(gathered_channel_keys, local_channel_keys)
+        channel_keys = sorted(
+            {key for rank_keys in gathered_channel_keys for key in (rank_keys or [])}
+        )
+    else:
+        channel_keys = local_channel_keys
+
+    metric_ref = None
+    for value in list(channel_loss_dict.values()) + list(
+        channel_loss_count_dict.values()
+    ):
+        if torch.is_tensor(value):
+            metric_ref = value
+            break
+    if metric_ref is None:
+        for name in ("loss", "total_loss", "flow_loss", "cross_entropy_loss"):
+            value = output_field(name)
+            if torch.is_tensor(value):
+                metric_ref = value
+                break
+
+    def zero_metric_tensor():
+        if metric_ref is None:
+            raise RuntimeError(
+                "Cannot reduce channel metrics without a tensor device reference "
+                "on this rank"
+            )
+        return torch.zeros((), device=metric_ref.device, dtype=torch.float32)
+
+    def channel_metric_tensor(key, source_dict):
+        value = source_dict.get(key)
+        if value is None:
+            return zero_metric_tensor()
+        return value.detach().clone().to(dtype=torch.float32)
+
+    def reduce_metric_tensor(tensor):
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        return tensor
+
+    for dataset_name_i in channel_keys:
+        count_tensor = channel_metric_tensor(dataset_name_i, channel_loss_count_dict)
+        loss_tensor = channel_metric_tensor(dataset_name_i, channel_loss_dict)
+        reduce_metric_tensor(count_tensor)
+        reduce_metric_tensor(loss_tensor)
         count_sum = count_tensor.item()
         if count_sum >= 0.5:
             stats[f"{prefix}channel_loss_{dataset_name_i}"] = (
                 loss_tensor.item() / count_sum
             )
-    if "action_accuracy" in channel_loss_dict and tokenizer_mixin is not None:
-        acc_tensor = channel_loss_dict["action_accuracy"].detach().clone()
-        dist.all_reduce(acc_tensor, op=dist.ReduceOp.SUM)
+    if "action_accuracy" in channel_keys and tokenizer_mixin is not None:
+        acc_tensor = channel_metric_tensor("action_accuracy", channel_loss_dict)
+        reduce_metric_tensor(acc_tensor)
         world_size = dist.get_world_size() if dist.is_initialized() else 1
         stats[f"{prefix}action_accuracy"] = acc_tensor.item() / world_size
         for key in tokenizer_mixin.get_accuracy_keys():
-            if key != "action_accuracy" and key in channel_loss_dict:
-                rvq_acc_tensor = channel_loss_dict[key].detach().clone()
-                dist.all_reduce(rvq_acc_tensor, op=dist.ReduceOp.SUM)
+            if key != "action_accuracy" and key in channel_keys:
+                rvq_acc_tensor = channel_metric_tensor(key, channel_loss_dict)
+                reduce_metric_tensor(rvq_acc_tensor)
                 stats[f"{prefix}{key}"] = rvq_acc_tensor.item() / world_size
     return stats

@@ -73,9 +73,9 @@ def require_websockets():
 
 
 _DEFAULT_CAM_WS_KEYS = {
-    "observation.images.faceImg": "face_view",
-    "observation.images.rightImg": "right_wrist_view",
-    "observation.images.leftImg": "left_wrist_view",
+    "observation.images.faceImg": "camera_front",
+    "observation.images.rightImg": "camera_right",
+    "observation.images.leftImg": "camera_left",
     "observation.images.move1Img": "move1_view",
 }
 
@@ -244,36 +244,42 @@ def resolve_feature_keys(
     return sk, ak
 
 
-def _arm_follow_pos_from_agent_cfg(
-    state_vec: np.ndarray,
-    agent_cfg: dict[str, int],
-    arm_prefix: str,
+def _pack_arm_follow_pos(
+    vec: np.ndarray,
+    config_block: dict[str, int],
+    arm_token: str,
 ) -> list[float] | None:
-    """Pack one arm into websocket ``follow{1,2}_pos`` layout: pos3 + rpy3 + grip1."""
+    """Pack one arm into websocket ``follow{1,2}_pos`` layout: pos3 + rpy3 + grip1.
+
+    ``arm_token`` is ``left`` or ``right``. 6D rotations are converted to ZYX Euler.
+    Keys past the end of ``vec`` (for example velocity / height / head that this
+    dataset does not store) are treated as zeros.
+    """
     from wall_x._vendor.x2robot_utils import geometry as geom
 
     pos = rot = grip = None
     start = 0
-    for key, dim in agent_cfg.items():
+    for key, dim in config_block.items():
         if key == "action_padding":
             start += int(dim)
             continue
         end = start + int(dim)
         chunk = (
-            state_vec[start:end]
-            if end <= state_vec.shape[0]
+            vec[start:end]
+            if end <= vec.shape[0]
             else np.zeros(int(dim), dtype=np.float32)
         )
         start = end
-        if not key.startswith(arm_prefix):
+        key_l = key.lower()
+        if arm_token not in key_l:
             continue
-        if "cartesian_pos" in key:
+        if "cartesian_pos" in key_l:
             pos = chunk.reshape(-1)
-        elif "rotation_6d" in key.lower():
+        elif "rotation_6d" in key_l:
             rot = geom.so3_to_euler_zyx_batch_nb(chunk.reshape(1, -1)).reshape(-1)
-        elif "rotation" in key:
+        elif "rotation" in key_l:
             rot = chunk.reshape(-1)
-        elif "gripper" in key:
+        elif "gripper" in key_l:
             grip = chunk.reshape(-1)
 
     if pos is None or rot is None or grip is None:
@@ -284,6 +290,24 @@ def _arm_follow_pos_from_agent_cfg(
     return packed.tolist()
 
 
+def actions_to_follow_pos_14d(
+    actions: np.ndarray,
+    config_block: dict[str, int],
+) -> np.ndarray | None:
+    """Convert ``[T, D]`` dof-layout actions into serialized ``[T, 14]`` follow poses."""
+    actions = np.asarray(actions, dtype=np.float32)
+    if actions.ndim != 2 or not config_block:
+        return None
+    rows: list[list[float]] = []
+    for row in actions:
+        left = _pack_arm_follow_pos(row, config_block, "left")
+        right = _pack_arm_follow_pos(row, config_block, "right")
+        if left is None or right is None:
+            return None
+        rows.append(left + right)
+    return np.asarray(rows, dtype=np.float32)
+
+
 def build_state_payload(
     state_vec: np.ndarray,
     train_config: dict[str, Any],
@@ -291,49 +315,35 @@ def build_state_payload(
     """Build websocket ``state`` dict from a flat proprio vector."""
     state_vec = np.asarray(state_vec, dtype=np.float32).reshape(-1)
 
-    # LeRobot dual-arm export in this workflow is already raw follow-pos 14D:
-    # [L_pos3, L_rot3, L_grip1, R_pos3, R_rot3, R_grip1].
-    # Prefer direct passthrough and avoid parsing with agent_pos_config
-    # (which may be 6D/padded and would mis-slice a 14D state).
-    if state_vec.shape[0] >= 14:
+    # Exact 14D exports are already [L xyz rpy grip, R xyz rpy grip].
+    # Longer vectors (20D/26D with 6D rotation) must be unpacked by config.
+    if state_vec.shape[0] == 14:
         return {
             "follow1_pos": state_vec[:7].tolist(),
             "follow2_pos": state_vec[7:14].tolist(),
         }
-    if state_vec.shape[0] >= 7:
-        return {"follow2_pos": state_vec.tolist()}
 
     agent_cfg = _agent_pos_config(train_config)
-
     if agent_cfg:
-        has_left = any(k.startswith("follow_left_") for k in agent_cfg)
-        has_right = any(k.startswith("follow_right_") for k in agent_cfg)
         payload: dict[str, list[float]] = {}
-        if has_left:
-            left = _arm_follow_pos_from_agent_cfg(state_vec, agent_cfg, "follow_left_")
-            if left is not None:
-                payload["follow1_pos"] = left
-        if has_right:
-            right = _arm_follow_pos_from_agent_cfg(
-                state_vec, agent_cfg, "follow_right_"
-            )
-            if right is not None:
-                payload["follow2_pos"] = right
+        left = _pack_arm_follow_pos(state_vec, agent_cfg, "left")
+        right = _pack_arm_follow_pos(state_vec, agent_cfg, "right")
+        if left is not None:
+            payload["follow1_pos"] = left
+        if right is not None:
+            payload["follow2_pos"] = right
         if payload:
             return payload
 
-        # Legacy single-arm LIBERO path: only follow_right_* in agent_pos_config.
         real_dim = real_vector_dim(agent_cfg)
         if real_dim > 0 and state_vec.shape[0] >= real_dim:
             sliced = slice_by_config(state_vec, agent_cfg)
             if sliced.shape[0] == 0:
                 sliced = state_vec[:real_dim]
-            right = _arm_follow_pos_from_agent_cfg(
-                state_vec, agent_cfg, "follow_right_"
-            )
-            if right is not None:
-                return {"follow2_pos": right}
             return {"follow2_pos": sliced.tolist()}
+
+    if state_vec.shape[0] == 7:
+        return {"follow2_pos": state_vec.tolist()}
     raise ValueError(f"Unsupported state dimension: {state_vec.shape[0]}")
 
 
@@ -899,6 +909,16 @@ async def run_openloop_eval(
                 pred_chunk = extract_action_chunk_from_response(result, train_config)
                 if pred_chunk.ndim == 1:
                     pred_chunk = pred_chunk[np.newaxis, :]
+                if pred_chunk.shape[1] != gt_full.shape[1] and pred_chunk.shape[1] == 14:
+                    converted = actions_to_follow_pos_14d(gt_full, dof_cfg)
+                    if converted is not None:
+                        logger.info(
+                            "Converted dataset actions %s -> follow_pos %s for comparison",
+                            gt_full.shape,
+                            converted.shape,
+                        )
+                        gt_full = converted
+                        pred_full = np.full_like(gt_full, np.nan)
                 if pred_chunk.shape[1] != gt_full.shape[1]:
                     raise ValueError(
                         f"Prediction action dim {pred_chunk.shape[1]} does not match "

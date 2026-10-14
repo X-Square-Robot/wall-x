@@ -1,13 +1,13 @@
-import logging
-import os
 import time
+from torch.cuda import nvtx
 from abc import ABC, abstractmethod
-from contextlib import nullcontext
-from functools import wraps
 from typing import List
 
 import torch
-from torch.cuda import nvtx
+from functools import wraps
+from contextlib import nullcontext
+import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,7 @@ class TimerBase(ABC):
 
 
 class DummyTimer(TimerBase):
-    """Dummy Timer - no-op placeholder used when log level exceeds threshold."""
+    """Dummy Timer — no-op placeholder used when log level exceeds threshold."""
 
     def __init__(self):
         super().__init__("dummy timer")
@@ -228,6 +228,8 @@ class Timers:
         self._max_log_level = 2
 
     def __call__(self, name, log_level=None):
+        if self._log_level < 0:
+            return self._dummy_timer
         if name in self._timers:
             if log_level is not None:
                 assert log_level == self._log_levels[name], (
@@ -368,6 +370,8 @@ class Timers:
             reset: Reset each timer after reading its elapsed time.
             barrier: Synchronize across ranks before gathering times.
         """
+        if self._log_level < 0:
+            return None
         if names is None:
             names = list(self._timers.keys())
 
@@ -402,6 +406,8 @@ class Timers:
             reset: Reset each timer after reading.
             barrier: Synchronize across ranks first.
         """
+        if self._log_level < 0:
+            return
         output_string = self.get_all_timers_string(names, normalizer, reset, barrier)
         world_size = _get_world_size()
         current_rank = _get_rank()
@@ -430,6 +436,8 @@ class Timers:
             reset: Reset each timer after reading.
             barrier: Synchronize across ranks first.
         """
+        if self._log_level < 0:
+            return
         assert normalizer > 0.0
         name_to_min_max_time = self._get_global_min_max_time(
             names, reset, barrier, normalizer

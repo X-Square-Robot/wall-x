@@ -43,7 +43,10 @@ class BaseInferAdapter(ABC):
                     # Env-defined ndarray bundle, for example LIBERO:
                     # {"eef_pos":(3,), "eef_axisangle":(3,), "gripper":(1,),
                     #  "face_view":(H,W,3), "wrist_view":(H,W,3)}
-                "instruction": str,
+                "instruction": str | Mapping[str, str],
+                    # Structured wallx_task_instruction input uses
+                    # {"task": str, "subtask": str}. "detail" remains a
+                    # backward-compatible alias for "subtask".
                 "noise":       np.ndarray | None,
                     # Flow may pass (chunk_horizon, action_dim); other modes
                     # may leave this as None.

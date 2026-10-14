@@ -11,6 +11,7 @@ from .infra_config import (
     DebugConfig,
     DistributedConfig,
     LoggingConfig,
+    ServingConfig,
 )
 from .model_config import ModelConfig
 from .task_config import TaskConfig
@@ -20,8 +21,8 @@ from .task_config import TaskConfig
 class TrainConfig:
     """Top-level Wall-X training config."""
 
-    model_type: str = "qwen2_5"
-    task: TaskConfig = field(default_factory=TaskConfig)
+    model_type: str
+    task: TaskConfig
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
     hyperparams: TrainHyperParams = field(default_factory=TrainHyperParams)
@@ -29,6 +30,7 @@ class TrainConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
+    serving: ServingConfig = field(default_factory=ServingConfig)
     # Raw YAML sections preserved verbatim for backend APIs that read fields
     # not captured by the typed DataConfig dataclass.
     _raw_data: Dict[str, Any] = field(default_factory=dict)
