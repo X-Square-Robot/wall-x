@@ -1,3 +1,4 @@
+import contextlib
 import copy
 import json
 import os
@@ -38,6 +39,7 @@ from wall_x._vendor.harrix.utils.dataset_v2 import (
     replace_state_schema_placeholder,
     validate_inference_data_semantics,
 )
+from wall_x.model.core.refiner import RefinerConfig, verify_loaded
 from wall_x.model.core.action.normalizer import (
     NORM_KEY_SEP,
     Normalizer,
@@ -317,6 +319,7 @@ class WallxModelWrapper:
                 self.model.resize_token_embeddings(checkpoint_vocab_size)
 
         msg = self.model.load_state_dict(state_dict, strict=False)
+        self._verify_refiner_load(state_dict, msg)
         self.model.set_normalizer(
             copy.deepcopy(self.normalizer_action),
             copy.deepcopy(self.normalizer_propri),
@@ -325,6 +328,17 @@ class WallxModelWrapper:
         self.model.eval()
         self.model.to(self.config.model_device)
         self.model.to_bfloat16_for_selected_params()
+
+    def _verify_refiner_load(self, state_dict, load_result):
+        vla_config = getattr(self.model.config, "vla_config", None)
+        loaded = verify_loaded(
+            getattr(self.model, "model", self.model),
+            state_dict.keys(),
+            load_result.missing_keys,
+            RefinerConfig.from_vla_config(vla_config),
+        )
+        if loaded:
+            self.logger.info("residual refiner: loaded %d twin tensors", loaded)
 
     def _register_normalizers(self):
         missing = object()
@@ -512,42 +526,17 @@ class WallxModelWrapper:
             # TODO[KC]: optimize this using batch processing
             image_inputs = []
             all_image_sizes = []
-            if ENABLE_GPU_RESIZE:
-                for obs in observation:
-                    current_image_inputs = self._resize_images_gpu(obs)
-                    image_inputs.extend(current_image_inputs)
-                    all_image_sizes.extend(
-                        [
-                            image_i.size
-                            if isinstance(image_i, Image.Image)
-                            else (image_i.shape[1], image_i.shape[0])
-                            for image_i in current_image_inputs
-                        ]
-                    )
-            elif ENABLE_FAST_PREPROCESS:
-                for obs in observation:
-                    current_image_inputs = self._resize_images_fast(obs)
-                    image_inputs.extend(current_image_inputs)
-                    all_image_sizes.extend(
-                        [
-                            image_i.size
-                            if isinstance(image_i, Image.Image)
-                            else (image_i.shape[1], image_i.shape[0])
-                            for image_i in current_image_inputs
-                        ]
-                    )
-            else:
-                for obs in observation:
-                    current_image_inputs = self._resize_images(obs)
-                    image_inputs.extend(current_image_inputs)
-                    all_image_sizes.extend(
-                        [
-                            image_i.size
-                            if isinstance(image_i, Image.Image)
-                            else (image_i.shape[1], image_i.shape[0])
-                            for image_i in current_image_inputs
-                        ]
-                    )
+            for obs in observation:
+                current_image_inputs = self._observation_images(obs)
+                image_inputs.extend(current_image_inputs)
+                all_image_sizes.extend(
+                    [
+                        image_i.size
+                        if isinstance(image_i, Image.Image)
+                        else (image_i.shape[1], image_i.shape[0])
+                        for image_i in current_image_inputs
+                    ]
+                )
 
         additional_inputs["image_size"] = all_image_sizes
 
@@ -826,6 +815,21 @@ class WallxModelWrapper:
 
         return prefix_text, postfix_text
 
+    def _observation_images(self, observation):
+        """Model images of one observation, in prompt placeholder order."""
+        return self._resize_camera_images(observation)
+
+    def _resize_camera_images(self, observation):
+        if ENABLE_GPU_RESIZE:
+            return self._resize_images_gpu(observation)
+        if ENABLE_FAST_PREPROCESS:
+            return self._resize_images_fast(observation)
+        return self._resize_images(observation)
+
+    def _action_prompt(self, observation, instruction):
+        """(prefix, postfix) text of a flow-action request for ``observation``."""
+        return self.get_text_for_action(instruction)
+
     @timer
     def _resize_images(self, observation):
         image_inputs = []
@@ -1024,7 +1028,7 @@ class WallxModelWrapper:
         self.logger.info("generating flow action")
         self.logger.info(f"flow action instruction: {instruction}")
 
-        prefix_text, postfix_text = self.get_text_for_action(instruction)
+        prefix_text, postfix_text = self._action_prompt(observation, instruction)
         model_input = self.construct_model_input(
             [observation], [prefix_text], [postfix_text]
         )
@@ -1067,7 +1071,7 @@ class WallxModelWrapper:
         )
         self.logger.info(f"RTC instruction: {instruction}")
 
-        prefix_text, postfix_text = self.get_text_for_action(instruction)
+        prefix_text, postfix_text = self._action_prompt(observation, instruction)
         model_input = self.construct_model_input(
             [observation], [prefix_text], [postfix_text]
         )
@@ -1166,7 +1170,7 @@ class WallxModelWrapper:
             int(num_steps) if num_steps else self.config.num_inference_timesteps
         )
 
-        with ScopeTimer("generate_flow_action_rtc"):
+        with ScopeTimer("generate_flow_action_rtc"), self._inference_autocast():
             model_output = self.model.generate_flow_action(
                 action_horizon=self.config.action_horizon,
                 action_dim=self.config.action_dim,
@@ -1204,14 +1208,20 @@ class WallxModelWrapper:
             generate_kwargs["padding_action"] = self.normalizer_action.normalize_data(
                 padding, model_input["dataset_names"]
             ).to(model_input["input_ids"].device)
+        with self._inference_autocast():
+            return self.model.generate_flow_action(**generate_kwargs)
+
+    def _inference_autocast(self):
+        """bf16 autocast for Qwen3.5 on CUDA, as in training.
+
+        The model intentionally keeps selected normalization parameters in
+        fp32, so invoking it without autocast produces a bf16/float LayerNorm
+        dtype mismatch.
+        """
         device_type = str(self.config.model_device).split(":", 1)[0]
         if self.model_type == "qwen3_5" and device_type == "cuda":
-            # Training runs Qwen3.5 under bf16 autocast. The model intentionally
-            # keeps selected normalization parameters in fp32, so invoking it
-            # without autocast produces a bf16/float LayerNorm dtype mismatch.
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                return self.model.generate_flow_action(**generate_kwargs)
-        return self.model.generate_flow_action(**generate_kwargs)
+            return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        return contextlib.nullcontext()
 
     @staticmethod
     def _merge_model_inputs(model_inputs):
@@ -1255,7 +1265,9 @@ class WallxModelWrapper:
             for index, (observation, instruction) in enumerate(
                 zip(observations, instructions)
             ):
-                prefix_text, postfix_text = self.get_text_for_action(instruction)
+                prefix_text, postfix_text = self._action_prompt(
+                    observation, instruction
+                )
                 sample_input = self.construct_model_input(
                     [observation], [prefix_text], [postfix_text]
                 )
@@ -1287,8 +1299,10 @@ class WallxModelWrapper:
         else:
             prefix_list = []
             postfix_list = []
-            for instruction in instructions:
-                prefix_text, postfix_text = self.get_text_for_action(instruction)
+            for observation, instruction in zip(observations, instructions):
+                prefix_text, postfix_text = self._action_prompt(
+                    observation, instruction
+                )
                 prefix_list.append(prefix_text)
                 postfix_list.append(postfix_text)
             batch_inputs = self.construct_model_input(
@@ -1339,11 +1353,7 @@ class WallxModelWrapper:
         if max_new_tokens is not None:
             gen_kwargs["max_new_tokens"] = int(max_new_tokens)
 
-        device_type = str(self.config.model_device).split(":", 1)[0]
-        if self.model_type == "qwen3_5" and device_type == "cuda":
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                model_output = self.model.generate_ar_action(**gen_kwargs)
-        else:
+        with self._inference_autocast():
             model_output = self.model.generate_ar_action(**gen_kwargs)
         self.logger.info("AR action generated")
 

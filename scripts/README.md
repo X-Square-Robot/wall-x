@@ -83,6 +83,27 @@ Each request returns `--replan-steps` actions as
 end-effector pose in the frame recorded in the checkpoint config. The first
 request for each new batch size is slower while kernels autotune.
 
+### Keyframe memory
+
+Checkpoints trained with the `keyframe_memory_packing` epilogue are detected
+from their config (`--memory auto`, the default) and served in two passes per
+request: every `--memory-select-stride` frames (default 48) a selection pass
+decides which recent head-camera frames to keep, and the action pass sees the
+kept frames in its prompt. The memory is held by the client: each observation
+carries the state returned by the previous response (`kfmem_client_state_v1`,
+documented in `wall_x/serving/robodojo/memory_protocol.py`), so the server
+keeps no per-episode state and does not batch requests. Observations need a
+`task_id`; `--memory-tasks` restricts memory to a list of tasks.
+
+### Residual refiner
+
+A checkpoint whose `vla_config.refiner` is enabled carries a second set of
+action-branch weights (`*_refiner`) that run once after flow sampling and add a
+residual to the sampled chunk. Nothing needs to be configured at serving time,
+but `--num-inference-timesteps` must equal the refiner's `num_steps`; any other
+value, an enabled refiner without weights, or refiner weights in a checkpoint
+whose config has it disabled, is refused at load or first request.
+
 ## Dataset and checkpoint utilities
 
 - `compute_norm_stats.py`: compute action normalization statistics for a

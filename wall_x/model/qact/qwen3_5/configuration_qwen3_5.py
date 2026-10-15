@@ -77,6 +77,10 @@ class VLAConfig(PreTrainedConfig):
             Whether to force deterministic (non-Flash) attention for reproducibility.
         use_x_loss (`bool`, *optional*, defaults to `False`):
             Whether to add an auxiliary x0-prediction loss during flow-matching training.
+        refiner (`dict`, *optional*):
+            Residual refiner (``enabled``, ``num_steps``, ``timestep``): one extra
+            action-branch pass on twin weights after flow sampling. See
+            ``wall_x.model.core.refiner``.
 
     Example::
 
@@ -117,6 +121,7 @@ class VLAConfig(PreTrainedConfig):
         rtc_train=None,
         use_per_token_tau: bool = False,
         rtc_rope_gap: int = 0,
+        refiner=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -152,6 +157,7 @@ class VLAConfig(PreTrainedConfig):
         self.rtc_train = rtc_train
         self.use_per_token_tau = use_per_token_tau
         self.rtc_rope_gap = rtc_rope_gap
+        self.refiner = refiner
 
 
 class Qwen3_5TextConfig(PreTrainedConfig):
