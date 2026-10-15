@@ -145,27 +145,33 @@ class RoboDojoPolicyConfig:
     default_instruction: str = ""
 
 
+def build_infer_config(config: RoboDojoPolicyConfig):
+    """Load the checkpoint's inference config (configs only, no weights)."""
+    from wall_x._vendor.harrix.infer.infer_config import InferConfig
+
+    infer_kwargs = dict(
+        checkpoint_path=config.checkpoint_path,
+        train_config_path=config.train_config_path,
+        robot_type=config.robot_type,
+        norm_key=config.norm_key,
+        model_device=config.model_device,
+        num_inference_timesteps=config.num_inference_timesteps,
+    )
+    if config.action_horizon is not None:
+        infer_kwargs["action_horizon"] = config.action_horizon
+    return InferConfig(**infer_kwargs)
+
+
 class WallXRoboDojoPolicy:
     """Stateless flow policy: each request is answered from its own observation."""
 
-    def __init__(self, config: RoboDojoPolicyConfig):
-        from wall_x._vendor.harrix.infer.infer_config import InferConfig
+    def __init__(self, config: RoboDojoPolicyConfig, infer_config=None):
         from wall_x._vendor.harrix.utils.dataset_v2 import (
             resolve_relative_action_frame,
         )
 
         self.config = config
-        infer_kwargs = dict(
-            checkpoint_path=config.checkpoint_path,
-            train_config_path=config.train_config_path,
-            robot_type=config.robot_type,
-            norm_key=config.norm_key,
-            model_device=config.model_device,
-            num_inference_timesteps=config.num_inference_timesteps,
-        )
-        if config.action_horizon is not None:
-            infer_kwargs["action_horizon"] = config.action_horizon
-        self.infer_config = InferConfig(**infer_kwargs)
+        self.infer_config = infer_config or build_infer_config(config)
         horizon = int(self.infer_config.action_horizon)
         if not 0 <= config.action_start_index < horizon:
             raise ValueError(f"action_start_index must be in [0, {horizon})")

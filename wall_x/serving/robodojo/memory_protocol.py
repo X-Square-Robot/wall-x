@@ -40,17 +40,19 @@ HISTORY_KEY = "kfmem_history"
 RESPONSE_KEY = "kfmem_state"
 VERSION = 1
 _CONTEXT_KEY = re.compile(r"[A-Za-z0-9_-]{1,128}")
-# The first request may arrive after a short warm-up of at most this many steps.
-_MAX_FIRST_FRAME = 48
+# The first request may arrive after a warm-up of at most this many steps, and
+# later requests may advance at most this many steps: the history a request
+# carries is bounded by it.
+MAX_ADVANCE = 48
 
 
 def _invalid(message: str):
     raise WsError(ErrorCode.INVALID_FRAME, message)
 
 
-def _frame_id(value: Any) -> int:
+def _frame_id(value: Any, field: str = "sim_frame") -> int:
     if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 0:
-        _invalid("sim_frame must be a nonnegative integer")
+        _invalid(f"{field} must be a nonnegative integer")
     return int(value)
 
 
@@ -110,7 +112,7 @@ def parse_request(
 
     previous = raw.get("prev_sim_frame")
     if previous is not None:
-        previous = _frame_id(previous)
+        previous = _frame_id(previous, "prev_sim_frame")
         if previous >= now:
             _invalid("prev_sim_frame must be less than sim_frame")
     _check_history(obs.get(HISTORY_KEY, []), now, previous, max_advance)
@@ -132,7 +134,7 @@ def parse_request(
     if len({f.index for f in memory}) != len(memory):
         _invalid("mem frame IDs must be unique")
 
-    last_select = _frame_id(raw.get("last_sel_frame"))
+    last_select = _frame_id(raw.get("last_sel_frame"), "last_sel_frame")
     if last_select > now:
         _invalid("last_sel_frame must not exceed sim_frame")
     context_key = raw.get("context_key")
@@ -147,23 +149,23 @@ def parse_request(
             ring=ring,
             memory=memory,
             last_select_frame=last_select,
-            consecutive_skips=_frame_id(raw.get("consec_skip")),
+            consecutive_skips=_frame_id(raw.get("consec_skip"), "consec_skip"),
         ),
         previous_frame=previous,
         context_key=context_key,
         rng_state=rng_state,
-        dump_count=_frame_id(raw.get("dump_count")),
+        dump_count=_frame_id(raw.get("dump_count"), "dump_count"),
         client_boxes=_parse_boxes(raw.get("mem_boxes"), [f.index for f in memory]),
     )
 
 
 def _check_history(history: Any, now: int, previous: Optional[int], max_advance: int):
-    if not isinstance(history, list) or len(history) > _MAX_FIRST_FRAME:
-        _invalid(f"{HISTORY_KEY} must be a list of at most {_MAX_FIRST_FRAME} execution frames")
+    if not isinstance(history, list) or len(history) > MAX_ADVANCE:
+        _invalid(f"{HISTORY_KEY} must be a list of at most {MAX_ADVANCE} execution frames")
     frames = [f.index for f in _frames(history, "history")]
     if previous is None:
-        if now > _MAX_FIRST_FRAME:
-            _invalid(f"first observation must start within the first {_MAX_FIRST_FRAME} steps")
+        if now > MAX_ADVANCE:
+            _invalid(f"first observation must start within the first {MAX_ADVANCE} steps")
         expected = list(range(1, now + 1))
     else:
         if now - previous > max_advance:

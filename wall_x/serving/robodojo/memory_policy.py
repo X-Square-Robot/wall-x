@@ -19,6 +19,7 @@ import torch
 
 from wall_x.serving.keyframe_memory.config import KeyframeMemoryConfig
 from wall_x.serving.robodojo.memory_protocol import (
+    MAX_ADVANCE,
     RESPONSE_KEY,
     ClientRequest,
     initial_state,
@@ -46,7 +47,12 @@ class ClientRng:
 
     def __init__(self, device: str):
         self.enabled = str(device).startswith("cuda") and torch.cuda.is_available()
-        self.initial = bytes(torch.cuda.get_rng_state().numpy()) if self.enabled else None
+        # The generator of the device the model samples on, not the current one.
+        self.device = torch.device(device) if self.enabled else None
+        self.initial = self._get() if self.enabled else None
+
+    def _get(self) -> bytes:
+        return bytes(torch.cuda.get_rng_state(self.device).numpy())
 
     def validate(self, raw: Optional[bytes]) -> None:
         if not self.enabled:
@@ -63,12 +69,14 @@ class ClientRng:
         if not self.enabled:
             yield lambda: None
             return
-        saved = torch.cuda.get_rng_state()
-        torch.cuda.set_rng_state(torch.frombuffer(bytearray(raw), dtype=torch.uint8).clone())
+        saved = torch.cuda.get_rng_state(self.device)
+        torch.cuda.set_rng_state(
+            torch.frombuffer(bytearray(raw), dtype=torch.uint8).clone(), self.device
+        )
         try:
-            yield lambda: bytes(torch.cuda.get_rng_state().numpy())
+            yield self._get
         finally:
-            torch.cuda.set_rng_state(saved)
+            torch.cuda.set_rng_state(saved, self.device)
 
 
 class KeyframeMemoryRoboDojoPolicy(WallXRoboDojoPolicy):
@@ -78,13 +86,21 @@ class KeyframeMemoryRoboDojoPolicy(WallXRoboDojoPolicy):
     def __init__(
         self,
         config: RoboDojoPolicyConfig,
+        infer_config=None,
         memory: Optional[KeyframeMemoryConfig] = None,
         memory_overrides: Optional[Dict[str, Any]] = None,
     ):
+        if config.replan_steps > MAX_ADVANCE:
+            # The client sends every frame since the previous request; the
+            # protocol bounds that history at MAX_ADVANCE frames.
+            raise ValueError(
+                f"keyframe-memory serving supports replan_steps <= {MAX_ADVANCE}, "
+                f"got {config.replan_steps}"
+            )
         self._memory = memory
         self._memory_overrides = dict(memory_overrides or {})
         self._box_cache: "OrderedDict[str, dict]" = OrderedDict()
-        super().__init__(config)
+        super().__init__(config, infer_config)
         self._rng = ClientRng(self.infer_config.model_device)
 
     @property

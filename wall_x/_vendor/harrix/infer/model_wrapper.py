@@ -1,3 +1,4 @@
+import contextlib
 import copy
 import json
 import os
@@ -1169,7 +1170,7 @@ class WallxModelWrapper:
             int(num_steps) if num_steps else self.config.num_inference_timesteps
         )
 
-        with ScopeTimer("generate_flow_action_rtc"):
+        with ScopeTimer("generate_flow_action_rtc"), self._inference_autocast():
             model_output = self.model.generate_flow_action(
                 action_horizon=self.config.action_horizon,
                 action_dim=self.config.action_dim,
@@ -1207,14 +1208,20 @@ class WallxModelWrapper:
             generate_kwargs["padding_action"] = self.normalizer_action.normalize_data(
                 padding, model_input["dataset_names"]
             ).to(model_input["input_ids"].device)
+        with self._inference_autocast():
+            return self.model.generate_flow_action(**generate_kwargs)
+
+    def _inference_autocast(self):
+        """bf16 autocast for Qwen3.5 on CUDA, as in training.
+
+        The model intentionally keeps selected normalization parameters in
+        fp32, so invoking it without autocast produces a bf16/float LayerNorm
+        dtype mismatch.
+        """
         device_type = str(self.config.model_device).split(":", 1)[0]
         if self.model_type == "qwen3_5" and device_type == "cuda":
-            # Training runs Qwen3.5 under bf16 autocast. The model intentionally
-            # keeps selected normalization parameters in fp32, so invoking it
-            # without autocast produces a bf16/float LayerNorm dtype mismatch.
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                return self.model.generate_flow_action(**generate_kwargs)
-        return self.model.generate_flow_action(**generate_kwargs)
+            return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        return contextlib.nullcontext()
 
     @staticmethod
     def _merge_model_inputs(model_inputs):
@@ -1346,11 +1353,7 @@ class WallxModelWrapper:
         if max_new_tokens is not None:
             gen_kwargs["max_new_tokens"] = int(max_new_tokens)
 
-        device_type = str(self.config.model_device).split(":", 1)[0]
-        if self.model_type == "qwen3_5" and device_type == "cuda":
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                model_output = self.model.generate_ar_action(**gen_kwargs)
-        else:
+        with self._inference_autocast():
             model_output = self.model.generate_ar_action(**gen_kwargs)
         self.logger.info("AR action generated")
 

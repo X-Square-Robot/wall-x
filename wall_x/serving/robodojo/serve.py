@@ -14,11 +14,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import os
 
-import yaml
-
-from wall_x.serving.robodojo.policy import RoboDojoPolicyConfig, WallXRoboDojoPolicy
+from wall_x.serving.robodojo.policy import (
+    RoboDojoPolicyConfig,
+    WallXRoboDojoPolicy,
+    build_infer_config,
+)
 from wall_x.serving.robodojo.server import PolicyServer, PolicyServerConfig
 
 
@@ -62,13 +63,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def trained_with_keyframe_memory(checkpoint_path: str, train_config_path: str | None) -> bool:
-    path = train_config_path or os.path.join(checkpoint_path, "config.yml")
-    with open(path, encoding="utf-8") as stream:
-        config = yaml.safe_load(stream) or {}
-    effective = (config.get("data") or {}).get("dataset_config_effective") or {}
-    processors = (effective.get("dataset") or effective).get("processors") or {}
-    return (processors.get("epilogue") or {}).get("type") == "keyframe_memory_packing"
+def trained_with_keyframe_memory(infer_config) -> bool:
+    epilogue = getattr(infer_config.data_config, "epilogue_processor_type", "")
+    return epilogue == "keyframe_memory_packing"
 
 
 def memory_overrides(args: argparse.Namespace) -> dict:
@@ -104,18 +101,25 @@ def main(argv=None) -> None:
         replan_steps=args.replan_steps,
         default_instruction=args.default_instruction,
     )
+    # Configs only (no weights); handed to the policy so it is loaded once.
+    infer_config = build_infer_config(policy_config)
     use_memory = args.memory == "on" or (
-        args.memory == "auto"
-        and trained_with_keyframe_memory(args.checkpoint_path, args.train_config_path)
+        args.memory == "auto" and trained_with_keyframe_memory(infer_config)
     )
+    overrides = memory_overrides(args)
     if use_memory:
         from wall_x.serving.robodojo.memory_policy import KeyframeMemoryRoboDojoPolicy
 
         policy = KeyframeMemoryRoboDojoPolicy(
-            policy_config, memory_overrides=memory_overrides(args)
+            policy_config, infer_config, memory_overrides=overrides
         )
     else:
-        policy = WallXRoboDojoPolicy(policy_config)
+        if overrides:
+            raise SystemExit(
+                f"--memory-* options given, but keyframe memory is off "
+                f"(--memory {args.memory}): {sorted(overrides)}"
+            )
+        policy = WallXRoboDojoPolicy(policy_config, infer_config)
     server = PolicyServer(
         policy,
         PolicyServerConfig(

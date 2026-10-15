@@ -111,12 +111,21 @@ class Qwen3_5VLAInferenceMixin:
     ):
         vla_config = self.config.vla_config
         if (
-            self.config._attn_implementation != "sdpa"
+            # RTC prefix pinning is implemented by the uncached path only.
+            self._requests_rtc(kwargs)
+            or self.config._attn_implementation != "sdpa"
             or vla_config.action_linear_attention
             or vla_config.causal_action_attention_mask
         ):
             return self.generate_flow_action_no_cache(**kwargs)
         return self.generate_flow_action_with_cache(**kwargs)
+
+    @staticmethod
+    def _requests_rtc(kwargs) -> bool:
+        return (
+            kwargs.get("prefix_actions") is not None
+            and int(kwargs.get("inference_delay") or 0) > 0
+        )
 
     @staticmethod
     def _get_flow_prefix_length(action_mask: torch.Tensor) -> int:
@@ -211,6 +220,11 @@ class Qwen3_5VLAInferenceMixin:
         **kwargs,
     ):
         """Generate flow actions while reusing the immutable VLM prefix KV."""
+        if self._requests_rtc(kwargs):
+            raise ValueError(
+                "RTC (prefix_actions with inference_delay > 0) is not implemented "
+                "on the KV-cache path; call generate_flow_action"
+            )
         if num_inference_timesteps < 1:
             raise ValueError("num_inference_timesteps must be at least 1")
 

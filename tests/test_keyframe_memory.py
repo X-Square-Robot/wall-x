@@ -234,3 +234,81 @@ def test_protocol_rejects_short_ring():
     obs["kfmem_client_state_v1"]["ring"].pop(0)
     with pytest.raises(WsError, match="ring"):
         parse_request(obs, max_advance=16, config=KeyframeMemoryConfig())
+
+
+def test_protocol_names_the_missing_field():
+    obs = request(80, 64)
+    del obs["kfmem_client_state_v1"]["consec_skip"]
+    with pytest.raises(WsError, match="consec_skip must be"):
+        parse_request(obs, max_advance=16, config=KeyframeMemoryConfig())
+
+
+# ----------------------------------------------------------------------
+# RoboDojo memory policy (no model)
+# ----------------------------------------------------------------------
+from types import SimpleNamespace
+
+from wall_x.serving.robodojo.memory_policy import ClientRng, KeyframeMemoryRoboDojoPolicy
+from wall_x.serving.robodojo.policy import RoboDojoPolicyConfig
+from wall_x.serving.robodojo.serve import trained_with_keyframe_memory
+
+
+def test_replan_steps_beyond_protocol_bound_is_rejected_before_loading():
+    with pytest.raises(ValueError, match="replan_steps <= 48"):
+        KeyframeMemoryRoboDojoPolicy(RoboDojoPolicyConfig(checkpoint_path="/nonexistent", replan_steps=64))
+
+
+def test_client_rng_without_cuda():
+    rng = ClientRng("cpu")
+    rng.validate(None)
+    with pytest.raises(WsError, match="unavailable"):
+        rng.validate(b"x")
+    with rng.loaded(None) as export:
+        assert export() is None
+
+
+class _FakeMemoryModel:
+    def __init__(self, config):
+        self.memory_config = config
+        self.seen_boxes = []
+
+    def infer_with_memory(self, observation, instruction, task_id, state):
+        self.seen_boxes.append(dict(state.boxes))
+        state.memory.append(state.ring[-1])
+        state.boxes[state.ring[-1].index] = (1, 2, 3, 4)
+        return {"robot_state_action_data": None}, None
+
+
+def _policy():
+    policy = object.__new__(KeyframeMemoryRoboDojoPolicy)
+    policy.config = RoboDojoPolicyConfig(checkpoint_path="x", replan_steps=16)
+    policy.model = _FakeMemoryModel(KeyframeMemoryConfig(box_crop=True))
+    policy._rng = ClientRng("cpu")
+    policy._box_cache = __import__("collections").OrderedDict()
+    policy._pending = None
+    policy._actions = lambda data: ["action"]
+    return policy
+
+
+def test_policy_returns_state_and_falls_back_to_cached_boxes():
+    policy = _policy()
+    first = request(16, None, history=list(range(1, 17)))
+    policy._pending = (None, "go", "imitate_sorting_sequence",
+                       parse_request(first, max_advance=16, config=policy.memory_config))
+    out = policy.get_action()
+    assert out["actions"] == ["action"]
+    assert out["kfmem_state"]["mem_frame_ids"] == [16]
+    assert out["kfmem_state"]["mem_boxes"] == {"16": [1, 2, 3, 4]}
+    # next request without echoed boxes: the server-side cache supplies them
+    second = request(32, 16, mem=(16,))
+    policy._pending = (None, "go", "imitate_sorting_sequence",
+                       parse_request(second, max_advance=16, config=policy.memory_config))
+    policy.get_action()
+    assert policy.model.seen_boxes[-1] == {16: (1, 2, 3, 4)}
+
+
+def test_memory_autodetection_reads_the_resolved_epilogue():
+    def cfg(epilogue):
+        return SimpleNamespace(data_config=SimpleNamespace(epilogue_processor_type=epilogue))
+    assert trained_with_keyframe_memory(cfg("keyframe_memory_packing"))
+    assert not trained_with_keyframe_memory(cfg("wallx"))

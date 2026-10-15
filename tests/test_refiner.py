@@ -111,3 +111,37 @@ def test_config_parsing():
     assert cfg == RefinerConfig(True, 10, 1.0)
     with pytest.raises(ValueError):
         RefinerConfig.from_vla_config(SimpleNamespace(refiner={"enabled": True}))
+
+
+# ----------------------------------------------------------------------
+# Flow dispatch: RTC requests take the uncached path, the cached path refuses them
+# ----------------------------------------------------------------------
+from wall_x.model.qact.qwen3_5.qwen3_5_inference_mixin import Qwen3_5VLAInferenceMixin
+
+
+class _Dispatch(Qwen3_5VLAInferenceMixin):
+    def __init__(self):
+        self.config = SimpleNamespace(
+            _attn_implementation="sdpa",
+            vla_config=SimpleNamespace(action_linear_attention=False, causal_action_attention_mask=False),
+        )
+
+    def generate_flow_action_no_cache(self, **kwargs):
+        return "no_cache"
+
+
+def test_rtc_requests_use_the_uncached_path():
+    model = _Dispatch()
+    model.generate_flow_action_with_cache = lambda **kwargs: "with_cache"
+    prefix = torch.zeros(1, 4, 2)
+    assert model.generate_flow_action() == "with_cache"
+    assert model.generate_flow_action(prefix_actions=prefix, inference_delay=0) == "with_cache"
+    assert model.generate_flow_action(prefix_actions=prefix, inference_delay=2) == "no_cache"
+
+
+def test_cached_path_refuses_rtc():
+    with pytest.raises(ValueError, match="RTC"):
+        Qwen3_5VLAInferenceMixin.generate_flow_action_with_cache(
+            _Dispatch(), input_ids=None, action_horizon=4, action_dim=2,
+            prefix_actions=torch.zeros(1, 4, 2), inference_delay=2,
+        )
