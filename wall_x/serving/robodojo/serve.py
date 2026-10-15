@@ -3,6 +3,10 @@
 Example:
     python -m wall_x.serving.robodojo.serve \\
         --checkpoint-path /path/to/ckpt --norm-key ex_normal --port 43865
+
+Keyframe-memory checkpoints (trained with the ``keyframe_memory_packing``
+epilogue) are detected from their config and served with client-held memory;
+see ``wall_x.serving.robodojo.memory_protocol`` for the request format.
 """
 
 from __future__ import annotations
@@ -10,6 +14,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
+
+import yaml
 
 from wall_x.serving.robodojo.policy import RoboDojoPolicyConfig, WallXRoboDojoPolicy
 from wall_x.serving.robodojo.server import PolicyServer, PolicyServerConfig
@@ -38,7 +45,45 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--ws-ping-timeout-s", type=optional_float, default=None)
     p.add_argument("--ws-compression", choices=("deflate", "none"), default="deflate")
     p.add_argument("--debug", action="store_true")
+    memory = p.add_argument_group("keyframe memory")
+    memory.add_argument(
+        "--memory",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="auto: on for checkpoints trained with keyframe_memory_packing.",
+    )
+    memory.add_argument("--memory-capacity", type=int, help="Memory bank size.")
+    memory.add_argument("--memory-candidates", type=int, help="Candidate frames per selection.")
+    memory.add_argument("--memory-select-stride", type=int, help="Frames between selections.")
+    memory.add_argument(
+        "--memory-tasks",
+        help="Comma-separated tasks that use memory (default: all tasks).",
+    )
     return p.parse_args(argv)
+
+
+def trained_with_keyframe_memory(checkpoint_path: str, train_config_path: str | None) -> bool:
+    path = train_config_path or os.path.join(checkpoint_path, "config.yml")
+    with open(path, encoding="utf-8") as stream:
+        config = yaml.safe_load(stream) or {}
+    effective = (config.get("data") or {}).get("dataset_config_effective") or {}
+    processors = (effective.get("dataset") or effective).get("processors") or {}
+    return (processors.get("epilogue") or {}).get("type") == "keyframe_memory_packing"
+
+
+def memory_overrides(args: argparse.Namespace) -> dict:
+    overrides = {
+        "capacity": args.memory_capacity,
+        "num_candidates": args.memory_candidates,
+        "select_stride": args.memory_select_stride,
+    }
+    if args.memory_tasks:
+        overrides["memory_tasks"] = frozenset(
+            task.strip() for task in args.memory_tasks.split(",") if task.strip()
+        )
+    if args.memory_select_stride is not None:
+        overrides["write_tail"] = args.memory_select_stride
+    return {k: v for k, v in overrides.items() if v is not None}
 
 
 def main(argv=None) -> None:
@@ -47,20 +92,30 @@ def main(argv=None) -> None:
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    policy = WallXRoboDojoPolicy(
-        RoboDojoPolicyConfig(
-            checkpoint_path=args.checkpoint_path,
-            train_config_path=args.train_config_path,
-            norm_key=args.norm_key,
-            model_device=args.model_device,
-            robot_type=args.robot_type,
-            action_horizon=args.action_horizon,
-            num_inference_timesteps=args.num_inference_timesteps,
-            action_start_index=args.action_start_index,
-            replan_steps=args.replan_steps,
-            default_instruction=args.default_instruction,
-        )
+    policy_config = RoboDojoPolicyConfig(
+        checkpoint_path=args.checkpoint_path,
+        train_config_path=args.train_config_path,
+        norm_key=args.norm_key,
+        model_device=args.model_device,
+        robot_type=args.robot_type,
+        action_horizon=args.action_horizon,
+        num_inference_timesteps=args.num_inference_timesteps,
+        action_start_index=args.action_start_index,
+        replan_steps=args.replan_steps,
+        default_instruction=args.default_instruction,
     )
+    use_memory = args.memory == "on" or (
+        args.memory == "auto"
+        and trained_with_keyframe_memory(args.checkpoint_path, args.train_config_path)
+    )
+    if use_memory:
+        from wall_x.serving.robodojo.memory_policy import KeyframeMemoryRoboDojoPolicy
+
+        policy = KeyframeMemoryRoboDojoPolicy(
+            policy_config, memory_overrides=memory_overrides(args)
+        )
+    else:
+        policy = WallXRoboDojoPolicy(policy_config)
     server = PolicyServer(
         policy,
         PolicyServerConfig(

@@ -150,7 +150,6 @@ class WallXRoboDojoPolicy:
 
     def __init__(self, config: RoboDojoPolicyConfig):
         from wall_x._vendor.harrix.infer.infer_config import InferConfig
-        from wall_x._vendor.harrix.infer.model_wrapper import WallxModelWrapper
         from wall_x._vendor.harrix.utils.dataset_v2 import (
             resolve_relative_action_frame,
         )
@@ -176,7 +175,7 @@ class WallXRoboDojoPolicy:
             self.infer_config.data_config
         )
         self.dof_mask = self._build_dof_mask()
-        self.model = WallxModelWrapper(self.infer_config)
+        self.model = self._build_model(self.infer_config)
         self._pending = None
         self._pending_batch = None
         logger.info(
@@ -187,6 +186,11 @@ class WallXRoboDojoPolicy:
             self.relative_action_frame,
             config.norm_key,
         )
+
+    def _build_model(self, infer_config):
+        from wall_x._vendor.harrix.infer.model_wrapper import WallxModelWrapper
+
+        return WallxModelWrapper(infer_config)
 
     # ------------------------------------------------------------------
     # XPolicyLab model interface

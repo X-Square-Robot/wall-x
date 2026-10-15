@@ -6,6 +6,8 @@ import torch
 from typing import Optional
 from torchdiffeq import odeint
 
+from wall_x.model.core.refiner import RefinerConfig, refine
+
 logger = logging.getLogger(__name__)
 
 
@@ -142,6 +144,27 @@ class Qwen3_5VLAInferenceMixin:
                 ]
             cache.conv_states[layer_idx] = None
             cache.recurrent_states[layer_idx] = None
+
+    def _refine(
+        self, candidate, *, dof_mask, embed_dtype, num_inference_timesteps, run_lm
+    ):
+        """Apply the residual refiner if this checkpoint has one."""
+        config = RefinerConfig.from_vla_config(self.config.vla_config)
+        if not config.enabled:
+            return candidate
+        if num_inference_timesteps != config.num_steps:
+            raise ValueError(
+                f"the refiner was trained on {config.num_steps}-step flow samples "
+                f"but inference integrates {num_inference_timesteps} steps"
+            )
+        return refine(
+            self.model,
+            candidate,
+            dof_mask=dof_mask,
+            embed_dtype=embed_dtype,
+            run_lm=run_lm,
+            config=config,
+        )
 
     @staticmethod
     def _clear_linear_attention_states(cache) -> None:
@@ -354,17 +377,7 @@ class Qwen3_5VLAInferenceMixin:
             device=inputs_embeds.device,
         )
 
-        def step_with_kvcache(timestep, current_action):
-            timestep = timestep.unsqueeze(0).repeat(current_action.shape[0])
-            action_embeds, adarms_cond = self.action_preprocessor.step(
-                timestep=timestep,
-                noisy_action=current_action,
-                dof_mask=dof_mask,
-            )
-            action_embeds = action_embeds[
-                :, :, : self.config.vla_config.dim_inputs[1]
-            ].to(postfix_inputs_embeds.dtype)
-
+        def run_postfix(action_embeds, adarms_cond):
             # Linear-attention states are deliberately excluded from this
             # optimization.  Clearing them keeps every ODE evaluation
             # independent while the full-attention prefix K/V stays shared.
@@ -382,6 +395,19 @@ class Qwen3_5VLAInferenceMixin:
                 adarms_conds=adarms_cond,
             )
             self._clear_linear_attention_states(prefix_cache)
+            return model_output
+
+        def step_with_kvcache(timestep, current_action):
+            timestep = timestep.unsqueeze(0).repeat(current_action.shape[0])
+            action_embeds, adarms_cond = self.action_preprocessor.step(
+                timestep=timestep,
+                noisy_action=current_action,
+                dof_mask=dof_mask,
+            )
+            action_embeds = action_embeds[
+                :, :, : self.config.vla_config.dim_inputs[1]
+            ].to(postfix_inputs_embeds.dtype)
+            model_output = run_postfix(action_embeds, adarms_cond)
             return predict_velocity(timestep, current_action, model_output)
 
         if num_inference_timesteps == 1:
@@ -394,6 +420,13 @@ class Qwen3_5VLAInferenceMixin:
                 method="euler",
             )
             predict_action_norm = action_trajectory[-1]
+        predict_action_norm = self._refine(
+            predict_action_norm,
+            dof_mask=dof_mask,
+            embed_dtype=postfix_inputs_embeds.dtype,
+            num_inference_timesteps=num_inference_timesteps,
+            run_lm=run_postfix,
+        )
 
         predict_action = self.action_preprocessor.normalizer_action.unnormalize_data(
             predict_action_norm, dataset_names
@@ -500,6 +533,10 @@ class Qwen3_5VLAInferenceMixin:
         # bit-identical (positional_masks stays None, no per-token tau, no pins).
         rtc_delay = int(max(0, min(int(inference_delay or 0), int(action_horizon))))
         use_rtc = rtc_delay > 0 and prefix_actions is not None
+        if use_rtc and RefinerConfig.from_vla_config(self.config.vla_config).enabled:
+            # The residual would move the pinned prefix, and the refiner never
+            # saw RTC candidates.
+            raise ValueError("the residual refiner does not support RTC inference")
         if use_rtc and attention_mask is None:
             # The asymmetric RTC attention is injected via the joint 2D mask,
             # which only runs when an attention_mask is present (see
@@ -600,6 +637,21 @@ class Qwen3_5VLAInferenceMixin:
             )
             v_padding = padding_action - noisy_action
 
+        def run_full(action_embeds, adarms_cond):
+            # Thread positional_masks only under RTC so the plain-flow path keeps
+            # kwargs byte-identical to before (no positional_masks key at all).
+            rtc_kwargs = {"positional_masks": positional_masks} if use_rtc else {}
+            return self.model.language_model(
+                input_ids=None,
+                position_ids=position_ids,
+                attention_mask=attention_mask,
+                inputs_embeds=inputs_embeds,
+                action_embeds=action_embeds,
+                action_mask=action_mask,
+                adarms_conds=adarms_cond,
+                **rtc_kwargs,
+            )
+
         def step(timestep, noisy_action):
             timestep = timestep.unsqueeze(0).repeat(noisy_action.shape[0])
             noisy_action_embeds, adarms_cond = self.action_preprocessor.step(
@@ -620,22 +672,7 @@ class Qwen3_5VLAInferenceMixin:
                 )
                 adarms_cond[:, :rtc_delay] = adarms_pinned.unsqueeze(1)
 
-            # Thread positional_masks only under RTC so the plain-flow path keeps
-            # kwargs byte-identical to before (no positional_masks key at all).
-            rtc_kwargs = {"positional_masks": positional_masks} if use_rtc else {}
-            model_output = self.model.language_model(
-                input_ids=None,
-                position_ids=position_ids,
-                attention_mask=attention_mask,
-                # past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds,
-                # cache_position=cache_position,
-                # for vla
-                action_embeds=noisy_action_embeds,
-                action_mask=action_mask,
-                adarms_conds=adarms_cond,
-                **rtc_kwargs,
-            )
+            model_output = run_full(noisy_action_embeds, adarms_cond)
 
             action_embeds = model_output.action_embeds
             action_embeds = action_embeds.to(torch.float32)
@@ -682,6 +719,13 @@ class Qwen3_5VLAInferenceMixin:
             # (5) Final pin: eliminate any residual float accumulation.
             current[:, :rtc_delay] = prefix_actions[:, :rtc_delay]
             predict_action_norm = current
+        predict_action_norm = self._refine(
+            predict_action_norm,
+            dof_mask=dof_mask,
+            embed_dtype=inputs_embeds.dtype,
+            num_inference_timesteps=num_inference_timesteps,
+            run_lm=run_full,
+        )
         predict_action = self.action_preprocessor.normalizer_action.unnormalize_data(
             predict_action_norm, dataset_names
         )

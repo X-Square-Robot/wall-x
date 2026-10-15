@@ -67,6 +67,7 @@ from wall_x.model.core.action.layout import (
 )
 from wall_x.model.core.ops.packed_position_ids import packed_position_ids
 from wall_x.model.core.action.processor import ActionProcessor
+from wall_x.model.core.refiner import RefinerConfig, install_twins
 from wall_x.model.qact.qwen3_5.qwen3_5_inference_mixin import Qwen3_5VLAInferenceMixin
 
 
@@ -1258,6 +1259,10 @@ class Qwen3_5_VLAForConditionalGeneration(
         self.model.action_token_id_set = self.action_token_id_set
 
         self.post_init()
+        if RefinerConfig.from_vla_config(config.vla_config).enabled:
+            # Built with the model so that checkpoint twin weights load into
+            # them like any other parameter.
+            install_twins(self.model)
 
     def set_normalizer(self, normalizer_action, normalizer_propri):
         self.action_preprocessor.set_normalizer(normalizer_action, normalizer_propri)
