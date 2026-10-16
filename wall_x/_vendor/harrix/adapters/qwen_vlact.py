@@ -374,12 +374,20 @@ class QwenVLActInferAdapter(BaseInferAdapter):
         else:
             prologue = f"{_ROLE_START}system\nYou are a helpful assistant.{_ROLE_END}\n"
         user_request = f"{_ROLE_START}user\nObservation:"
+        # LeRobot training prompts use the raw camera key unless the training
+        # config sets data.camera_name_mapping.
+        lerobot_cam_mapping = (
+            (self._typed_cfg.data.camera_name_mapping or {})
+            if self._typed_cfg.data.dataset_type == "lerobot"
+            else None
+        )
         for cn in self._cam_names:
-            display_name = (
-                text_processor.cam_name_mapping.get(cn, cn)
-                if text_processor is not None
-                else _camera_label(cn)
-            )
+            if text_processor is not None:
+                display_name = text_processor.cam_name_mapping.get(cn, cn)
+            elif lerobot_cam_mapping is not None:
+                display_name = lerobot_cam_mapping.get(cn, cn)
+            else:
+                display_name = _camera_label(cn)
             user_request += (
                 f" {display_name}: " f"{_VISION_START}{_IMAGE_PAD}{_VISION_END}"
             )
