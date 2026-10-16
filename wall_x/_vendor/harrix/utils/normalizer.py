@@ -19,7 +19,6 @@ from wall_x.data.backends.lerobot.utils import NormStats
 from wall_x.model.core.action.normalizer import (
     NORM_KEY_SEP,
     Normalizer,
-    _pad_lerobot_stats,
     make_norm_key,
 )
 
@@ -32,6 +31,28 @@ def _load_norm_stats(norm_stats_path: str, action_key: str) -> NormStats:
     q01 = torch.tensor(norm_stats["norm_stats"][action_key]["q01"])
     q99 = torch.tensor(norm_stats["norm_stats"][action_key]["q99"])
     return NormStats(min=q01, max=q99, delta=q99 - q01)
+
+
+def pad_norm_stats_like_collator(stats: NormStats, target_dim: int) -> NormStats:
+    """Tail-pad flat LeRobot stats so padded dims normalize to 0.
+
+    The LeRobot collator normalizes with the unpadded stats and then pads the
+    normalized action/state with zeros. min=-1, delta=2 maps a raw 0 to 0.
+    """
+    pad = int(target_dim) - int(stats.min.numel())
+    if pad < 0:
+        raise ValueError(
+            f"norm stats dim ({stats.min.numel()}) exceeds configured dim ({target_dim})"
+        )
+    if pad == 0:
+        return stats
+
+    def _cat(t, value):
+        return torch.cat([t.flatten(), torch.full((pad,), value, dtype=t.dtype)])
+
+    return NormStats(
+        min=_cat(stats.min, -1.0), max=_cat(stats.max, 1.0), delta=_cat(stats.delta, 2.0)
+    )
 
 
 def build_normalizers(
@@ -54,14 +75,11 @@ def build_normalizers(
 
     norm_stats_path = os.path.join(checkpoint_path, "norm_stats.json")
     if os.path.exists(norm_stats_path):
-        # Training tail-pads flat LeRobot stats to the configured slot dims.
-        propri_stats = _pad_lerobot_stats(
-            _load_norm_stats(norm_stats_path, "observation.state"),
-            cfg.propri_dim,
-            "state",
+        propri_stats = pad_norm_stats_like_collator(
+            _load_norm_stats(norm_stats_path, "observation.state"), cfg.propri_dim
         )
-        action_stats = _pad_lerobot_stats(
-            _load_norm_stats(norm_stats_path, "action"), cfg.action_dim, "action"
+        action_stats = pad_norm_stats_like_collator(
+            _load_norm_stats(norm_stats_path, "action"), cfg.action_dim
         )
         normalizer_propri = Normalizer.from_lerobot_norm_stats(propri_stats, norm_key)
         normalizer_action = Normalizer.from_lerobot_norm_stats(action_stats, norm_key)
