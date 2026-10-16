@@ -651,7 +651,11 @@ class Qwen3_5Config(PreTrainedConfig):
             "_attn_implementation", train_config.get("attn_implementation")
         )
         if attn_impl is not None:
+            # The HF setter recurses into sub-configs; the vision backend is
+            # chosen by capability in __init__ and must not follow the text one.
+            vision_attn_impl = self.vision_config._attn_implementation
             self._attn_implementation = attn_impl
+            self.vision_config._attn_implementation = vision_attn_impl
 
         # attn_deterministic derived from the single hyperparams.deterministic_algorithms
         # switch (MR !556 review) — one knob turns determinism on across all paths.

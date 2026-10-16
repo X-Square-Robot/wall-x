@@ -238,8 +238,8 @@ class Qwen3_5VLAVisionAttention(Qwen3_5VisionAttention):
                 )[0]
                 for q, k, v in zip(*splits)
             ]
+            # Each output is already (1, seq, heads, head_dim).
             attn_output = torch.cat(attn_outputs, dim=1)
-            attn_output = attn_output.squeeze(0).transpose(0, 1)
 
         attn_output = attn_output.reshape(seq_length, -1).contiguous()
         return self.proj(attn_output)
