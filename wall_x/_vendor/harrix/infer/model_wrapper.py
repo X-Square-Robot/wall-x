@@ -575,9 +575,10 @@ class WallxModelWrapper:
                 videos=None,
                 padding=True,
                 padding_side=padding_side,
-                truncation=not is_dataset_v2,
+                # Right truncation would drop the trailing action tokens.
+                truncation=False,
                 return_tensors="pt",
-                max_length=None if is_dataset_v2 else 1000,
+                max_length=None,
                 pad_to_128_multiple=False,
                 pad_prefix_to_same_length=pad_prefix,
                 norm_state=(
