@@ -19,6 +19,7 @@ from wall_x.data.backends.lerobot.utils import NormStats
 from wall_x.model.core.action.normalizer import (
     NORM_KEY_SEP,
     Normalizer,
+    _pad_lerobot_stats,
     make_norm_key,
 )
 
@@ -53,8 +54,15 @@ def build_normalizers(
 
     norm_stats_path = os.path.join(checkpoint_path, "norm_stats.json")
     if os.path.exists(norm_stats_path):
-        propri_stats = _load_norm_stats(norm_stats_path, "observation.state")
-        action_stats = _load_norm_stats(norm_stats_path, "action")
+        # Training tail-pads flat LeRobot stats to the configured slot dims.
+        propri_stats = _pad_lerobot_stats(
+            _load_norm_stats(norm_stats_path, "observation.state"),
+            cfg.propri_dim,
+            "state",
+        )
+        action_stats = _pad_lerobot_stats(
+            _load_norm_stats(norm_stats_path, "action"), cfg.action_dim, "action"
+        )
         normalizer_propri = Normalizer.from_lerobot_norm_stats(propri_stats, norm_key)
         normalizer_action = Normalizer.from_lerobot_norm_stats(action_stats, norm_key)
     else:

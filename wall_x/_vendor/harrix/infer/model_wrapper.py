@@ -43,6 +43,7 @@ from wall_x.model.core.refiner import RefinerConfig, verify_loaded
 from wall_x.model.core.action.normalizer import (
     NORM_KEY_SEP,
     Normalizer,
+    _pad_lerobot_stats,
     make_norm_key,
 )
 from wall_x._vendor.harrix.infer.logger import InferLogger
@@ -369,11 +370,20 @@ class WallxModelWrapper:
             self.logger.info(
                 f"loading LeRobot norm stats from checkpoint {checkpoint_path}: {norm_stats_path}"
             )
-            propri_stats = _load_norm_stats(norm_stats_path, "observation.state")
+            # Training tail-pads flat LeRobot stats to the configured slot dims.
+            propri_stats = _pad_lerobot_stats(
+                _load_norm_stats(norm_stats_path, "observation.state"),
+                sum(self.config.train_config["agent_pos_config"].values()),
+                "state",
+            )
             self.normalizer_propri = Normalizer.from_lerobot_norm_stats(
                 propri_stats, norm_key
             )
-            action_stats = _load_norm_stats(norm_stats_path, "action")
+            action_stats = _pad_lerobot_stats(
+                _load_norm_stats(norm_stats_path, "action"),
+                sum(self.config.train_config["dof_config"].values()),
+                "action",
+            )
             self.normalizer_action = Normalizer.from_lerobot_norm_stats(
                 action_stats, norm_key
             )
