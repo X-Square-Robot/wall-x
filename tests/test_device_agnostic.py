@@ -1,4 +1,40 @@
-v.resolve_device("auto") == torch.device("cpu")
+"""Device selection tests. They need no accelerator except the XPU parity test."""
+
+import importlib.util
+from unittest import mock
+
+import pytest
+import torch
+
+from wall_x.model.qact.qwen2_5.configuration_qwen2_5_vl import Qwen2_5_VLConfig
+from wall_x.model.qact.qwen2_5.modeling_qwen2_5_vl import (
+    QWEN2_5_VL_VISION_ATTENTION_CLASSES,
+)
+from wall_x.utils import device as dev
+
+
+def _host(xpu=False, cuda=False):
+    available = {"xpu": xpu, "cuda": cuda, "cpu": True}
+    return mock.patch.object(dev, "is_available", lambda name: available[name])
+
+
+def test_default_device_type_prefers_xpu_then_cuda_then_cpu():
+    with _host(xpu=True, cuda=True):
+        assert dev.default_device_type() == "xpu"
+    with _host(cuda=True):
+        assert dev.default_device_type() == "cuda"
+    with _host():
+        assert dev.default_device_type() == "cpu"
+
+
+def test_resolve_device_explicit_wins():
+    with _host(xpu=True):
+        assert dev.resolve_device("cpu") == torch.device("cpu")
+        assert dev.resolve_device("cuda:1") == torch.device("cuda", 1)
+        assert dev.resolve_device("xpu") == torch.device("xpu", 0)
+        assert dev.resolve_device(None) == torch.device("xpu", 0)
+    with _host():
+        assert dev.resolve_device("auto") == torch.device("cpu")
 
 
 def test_vision_attention_is_flash_only_on_cuda():
