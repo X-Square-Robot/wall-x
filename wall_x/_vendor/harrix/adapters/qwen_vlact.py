@@ -40,6 +40,7 @@ from wall_x._vendor.harrix.utils.train_config import (
     resolve_use_state_string_representation,
 )
 from wall_x.trainer.trainer_utils import load_wallx_processors
+from wall_x.utils.device import default_device_type
 
 
 _SUPPORTED_MODES = {"flow", "ar", "dllm", "vqa", "subtask"}
@@ -121,7 +122,7 @@ class QwenVLActInferAdapter(BaseInferAdapter):
         self._action_mode = mode
 
         ta = self._training_adapter()
-        device = "cuda"
+        device = default_device_type()
         self._device = device
         self._checkpoint_path = resolve_checkpoint_dir(cfg.model.checkpoint_path)
 

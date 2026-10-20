@@ -6,6 +6,8 @@ from typing import Any
 import yaml
 from qwen_vl_utils.vision_process import IMAGE_FACTOR, MAX_PIXELS, MIN_PIXELS
 
+from wall_x.utils.device import vision_attn_implementation
+
 logger = logging.getLogger(__name__)
 
 
@@ -325,7 +327,9 @@ class InferConfig:
         self.model_config.update_model_config(self.train_config)
 
         self.model_config._attn_implementation = "sdpa"
-        vision_attn = os.environ.get("WALLX_VISION_ATTN_IMPLEMENTATION", "flash_attention_2")
+        vision_attn = os.environ.get(
+            "WALLX_VISION_ATTN_IMPLEMENTATION", vision_attn_implementation()
+        )
         self.model_config.vision_config._attn_implementation = vision_attn
         logger.info(
             "[LoadModelConfig] vision _attn_implementation=%s (override via WALLX_VISION_ATTN_IMPLEMENTATION)",

@@ -102,6 +102,29 @@ The exported CUDA operator sources are included in
 parallelism. `--no-build-isolation` is required so the build can use the torch
 package already installed in the active environment.
 
+### How to run the same on Intel's XPU
+
+Inference runs on Intel GPUs through PyTorch's `xpu` backend. Skip the
+`flash-attn` and CUDA operator steps above and install the XPU wheels instead:
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/xpu
+pip install -r <(grep -v -E "^(torch|torchvision|torchaudio)==" requirements.txt)
+pip install --no-deps --no-build-isolation -e .
+```
+
+`setup.py` skips the CUDA operators when no CUDA toolkit is found, and the
+PyTorch fallbacks are used. The device is picked automatically (XPU, then CUDA,
+then CPU) and the vision tower uses SDPA instead of flash-attn. Select a card
+with `ZE_AFFINITY_MASK` where `CUDA_VISIBLE_DEVICES` was used:
+
+```bash
+ZE_AFFINITY_MASK=0 python scripts/fake_inference.py --checkpoint-path <path/to/checkpoint>
+ZE_AFFINITY_MASK=0 bash scripts/run_serving.sh --checkpoint-path <path/to/checkpoint> --model-device xpu
+```
+
+CUDA graphs (`--enable-cuda-graph`) and the simulator evaluation stay CUDA only.
+
 ## Training
 
 ### Finetune on LeRobot Datasets

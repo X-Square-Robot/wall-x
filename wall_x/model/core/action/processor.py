@@ -3,6 +3,7 @@ import torch.nn as nn
 
 from wall_x.model.core.action.head import SinusoidalPosEmb
 from wall_x.model.core.action.normalizer import print_rank_last
+from wall_x.utils.device import float32_autocast
 
 
 class ActionProcessor(nn.Module):
@@ -124,7 +125,7 @@ class ActionProcessor(nn.Module):
             dataset_names: [batch_size]
             dof_mask: [batch_size, action_dim]
         """
-        with torch.autocast("cuda", dtype=torch.float32):
+        with float32_autocast(self.propri_proj.weight.device.type):
             proprioception = proprioception.to(
                 device=self.propri_proj.weight.device
             ).to(dtype=self.propri_proj.weight.dtype)
@@ -222,7 +223,7 @@ class ActionProcessor(nn.Module):
     def step(self, timestep, noisy_action, dof_mask=None):
         # noisy_action: bs, pred_horizon, action_dim
         # timestep: bs
-        with torch.autocast("cuda", dtype=torch.float32):
+        with float32_autocast(self.w1.weight.device.type):
             if dof_mask is not None and self.config.proj_with_mask:
                 noisy_action = torch.cat([noisy_action, dof_mask], dim=-1)
 

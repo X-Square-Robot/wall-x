@@ -12,6 +12,8 @@ import logging
 
 import yaml
 
+from wall_x.utils.device import vision_attn_implementation
+
 logger = logging.getLogger(__name__)
 
 
@@ -338,7 +340,7 @@ def build_model_config(
     )
     model_config.update_model_config(legacy_train_config)
     model_config._attn_implementation = "sdpa"
-    model_config.vision_config._attn_implementation = "flash_attention_2"
+    model_config.vision_config._attn_implementation = vision_attn_implementation()
 
     return model_config
 
