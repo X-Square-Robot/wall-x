@@ -114,6 +114,104 @@ def test_config_parsing():
 
 
 # ----------------------------------------------------------------------
+# Loop checkpoints: chained passes with a step scale
+# ----------------------------------------------------------------------
+def _trained_model(seed: int = 0):
+    """Twins installed, output head non-zero so the residual actually moves."""
+    torch.manual_seed(seed)
+    model = Inner()
+    install_twins(model)
+    head = model.action_processor_refiner.action_proj_back
+    with torch.no_grad():
+        head.weight.copy_(torch.randn_like(head.weight))
+        head.bias.copy_(torch.randn_like(head.bias))
+    return model
+
+
+def _run(model, candidate, config):
+    return refine(
+        model,
+        candidate,
+        dof_mask=None,
+        embed_dtype=torch.float32,
+        run_lm=lambda embeds, adarms: model.run(embeds),
+        config=config,
+    )
+
+
+def test_refine_loops_chain_the_estimate_and_scale_each_step():
+    model = _trained_model()
+    candidate = torch.randn(2, 4, 2)
+    single = RefinerConfig(True, 10, 1.0, refine_loops=1)
+    one_pass = _run(model, candidate, single)
+    assert not torch.equal(one_pass, candidate)
+
+    calls = []
+
+    def run_lm(embeds, adarms):
+        calls.append(1)
+        return model.run(embeds)
+
+    loops = RefinerConfig(True, 10, 1.0, refine_loops=2, refine_step_scale=0.5)
+    refined = refine(
+        model,
+        candidate,
+        dof_mask=None,
+        embed_dtype=torch.float32,
+        run_lm=run_lm,
+        config=loops,
+    )
+    assert len(calls) == 2
+    # Each pass conditions on the current estimate and contributes 0.5 of its
+    # residual: mid = candidate + 0.5*d1, out = mid + 0.5*d2.
+    delta1 = one_pass - candidate
+    mid = candidate + 0.5 * delta1
+    delta2 = _run(model, mid, single) - mid
+    assert torch.allclose(refined, mid + 0.5 * delta2, atol=1e-6)
+
+
+def test_default_loops_are_bitwise_the_single_pass_release():
+    model = _trained_model()
+    candidate = torch.randn(2, 4, 2)
+    out = _run(model, candidate, RefinerConfig(True, 10))
+    processor = model.action_processor_refiner
+    head = processor.action_proj_back
+    with swapped_in(model):
+        embeds, _ = processor.step(
+            timestep=torch.full((2,), 1.0), noisy_action=candidate, dof_mask=None
+        )
+        output = model.run(embeds)
+    expected = candidate + head(output.action_embeds.to(head.weight.dtype)).float().reshape(
+        candidate.shape
+    )
+    assert torch.equal(out, expected)
+
+
+def test_refine_config_parses_loops_and_scale():
+    cfg = RefinerConfig.from_vla_config(
+        SimpleNamespace(
+            refiner={
+                "enabled": True,
+                "num_steps": 10,
+                "refine_loops": 4,
+                "refine_step_scale": 0.25,
+            }
+        )
+    )
+    assert (cfg.refine_loops, cfg.refine_step_scale) == (4, 0.25)
+    default = RefinerConfig()
+    assert (default.refine_loops, default.refine_step_scale) == (1, 1.0)
+
+
+@pytest.mark.parametrize("bad", [{"refine_loops": 0}, {"refine_step_scale": 0.0}])
+def test_refine_config_rejects_bad_loop_settings(bad):
+    with pytest.raises(ValueError):
+        RefinerConfig.from_vla_config(
+            SimpleNamespace(refiner={"enabled": True, "num_steps": 10, **bad})
+        )
+
+
+# ----------------------------------------------------------------------
 # Flow dispatch: RTC requests take the uncached path, the cached path refuses them
 # ----------------------------------------------------------------------
 from wall_x.model.qact.qwen3_5.qwen3_5_inference_mixin import Qwen3_5VLAInferenceMixin

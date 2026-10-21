@@ -39,7 +39,19 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--action-horizon", type=int, help="Defaults to the checkpoint's action horizon.")
     p.add_argument("--num-inference-timesteps", type=int, default=10)
     p.add_argument("--action-start-index", type=int, default=0)
-    p.add_argument("--replan-steps", type=int, default=16, help="Actions returned per request.")
+    p.add_argument(
+        "--replan-steps",
+        type=int,
+        default=16,
+        help="Steps the client advances per request (platform replan_steps).",
+    )
+    p.add_argument(
+        "--action-chunk-length",
+        type=int,
+        help="Actions returned per request. Defaults to --replan-steps for the "
+        "plain policy and to the checkpoint's full action horizon for "
+        "keyframe-memory checkpoints.",
+    )
     p.add_argument("--default-instruction", default="", help="Used when an observation has no instruction.")
     p.add_argument("--enable-jpeg-ndarray-v1", action="store_true")
     p.add_argument("--ws-ping-interval-s", type=optional_float, default=None)
@@ -99,6 +111,7 @@ def main(argv=None) -> None:
         num_inference_timesteps=args.num_inference_timesteps,
         action_start_index=args.action_start_index,
         replan_steps=args.replan_steps,
+        action_chunk_length=args.action_chunk_length,
         default_instruction=args.default_instruction,
     )
     # Configs only (no weights); handed to the policy so it is loaded once.

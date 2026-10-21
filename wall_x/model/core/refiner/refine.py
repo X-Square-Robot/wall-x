@@ -34,11 +34,19 @@ class RefinerConfig:
     ``num_steps`` is the integration budget the refiner was trained on. The
     refiner learned the residual of *that* candidate distribution, so serving
     with a different budget is refused rather than silently degraded.
+
+    ``refine_loops`` chains the pass: each iteration refines the previous
+    estimate, which is why loop checkpoints trained that way cannot be served
+    as a single pass. ``refine_step_scale`` is the fraction of each pass's
+    residual taken (``1.0`` with one loop is the plain ``candidate + residual``
+    pass every pre-loop checkpoint was trained with, and stays bit-identical).
     """
 
     enabled: bool = False
     num_steps: Optional[int] = None
     timestep: float = 1.0
+    refine_loops: int = 1
+    refine_step_scale: float = 1.0
 
     @classmethod
     def from_vla_config(cls, vla_config: Any) -> "RefinerConfig":
@@ -52,9 +60,17 @@ class RefinerConfig:
             enabled=bool(get("enabled", False)),
             num_steps=None if get("num_steps") is None else int(get("num_steps")),
             timestep=float(get("timestep", 1.0)),
+            refine_loops=int(get("refine_loops", 1)),
+            refine_step_scale=float(get("refine_step_scale", 1.0)),
         )
         if cfg.enabled and (cfg.num_steps is None or cfg.num_steps < 1):
             raise ValueError("vla_config.refiner.num_steps must be a positive integer")
+        if cfg.refine_loops < 1:
+            raise ValueError("vla_config.refiner.refine_loops must be >= 1")
+        if not cfg.refine_step_scale > 0.0:
+            raise ValueError(
+                "vla_config.refiner.refine_step_scale must be positive"
+            )
         return cfg
 
 
@@ -67,12 +83,16 @@ def refine(
     run_lm: Callable[[torch.Tensor, Any], Any],
     config: RefinerConfig,
 ) -> torch.Tensor:
-    """Return ``candidate`` plus the refiner's residual (normalized action space).
+    """Refine ``candidate`` with ``config.refine_loops`` residual passes.
 
     ``model`` owns ``action_processor`` and the twins. ``run_lm(action_embeds,
     adarms_conds)`` drives the decoder the same way the sampler's own velocity
     evaluations do, so the refiner sees exactly the observation the candidate
     was sampled from.
+
+    Each pass conditions on the current estimate and returns its residual; the
+    estimate moves by ``refine_step_scale`` of it. With one pass at scale 1.0
+    (every pre-loop checkpoint) this is ``candidate + residual``, unchanged.
     """
     batch, horizon, dim = candidate.shape
     processor = processor_twin(model)
@@ -80,14 +100,23 @@ def refine(
         (batch,), config.timestep, device=candidate.device, dtype=torch.float32
     )
     action_hidden = model.config.vla_config.dim_inputs[1]
-    with swapped_in(model):
-        embeds, adarms = processor.step(
-            timestep=timestep, noisy_action=candidate, dof_mask=dof_mask
-        )
-        output = run_lm(embeds[:, :, :action_hidden].to(embed_dtype), adarms)
     head = processor.action_proj_back
-    residual = head(output.action_embeds.to(head.weight.dtype)).float()
-    return candidate + residual.reshape(batch, horizon, dim)
+    refined = candidate
+    for _ in range(config.refine_loops):
+        with swapped_in(model):
+            embeds, adarms = processor.step(
+                timestep=timestep, noisy_action=refined, dof_mask=dof_mask
+            )
+            output = run_lm(embeds[:, :, :action_hidden].to(embed_dtype), adarms)
+        residual = head(output.action_embeds.to(head.weight.dtype)).float()
+        residual = residual.reshape(batch, horizon, dim)
+        # Scale 1.0 takes the residual as-is, so one-pass checkpoints stay
+        # bit-identical to the single-pass release.
+        if config.refine_step_scale == 1.0:
+            refined = refined + residual
+        else:
+            refined = refined + config.refine_step_scale * residual
+    return refined
 
 
 def verify_loaded(

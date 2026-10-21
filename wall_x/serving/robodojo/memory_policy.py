@@ -82,6 +82,9 @@ class ClientRng:
 class KeyframeMemoryRoboDojoPolicy(WallXRoboDojoPolicy):
     # Selection decisions are per episode; requests are served one at a time.
     supports_batch_infer = False
+    # The client advances by ``replan_steps``; the platform still wants the
+    # complete chunk, so every request returns the whole prediction horizon.
+    returns_full_chunk = True
 
     def __init__(
         self,

@@ -139,10 +139,43 @@ class RoboDojoPolicyConfig:
     robot_type: str = "desktop"
     action_horizon: int | None = None
     num_inference_timesteps: int = 10
-    # Returned chunk = predicted steps [action_start_index, + replan_steps).
+    # Returned chunk = predicted steps [action_start_index, + action_chunk_length).
+    # ``None`` means replan_steps for the plain policy and the full horizon for
+    # keyframe-memory checkpoints (the platform wants the complete chunk).
     action_start_index: int = 0
     replan_steps: int = 16
+    action_chunk_length: int | None = None
     default_instruction: str = ""
+
+
+def resolve_action_steps(
+    config: RoboDojoPolicyConfig, horizon: int, *, full_chunk: bool
+) -> int:
+    """How many predicted steps a request returns.
+
+    The platform asks for the whole checkpoint chunk (``len(actions) ==
+    action_chunk_length``) and advances the policy by ``replan_steps``. Keeping
+    the two apart is what lets a memory policy return 32 actions and move 16 —
+    the same split the in-house service serves with.
+    """
+    available = int(horizon) - int(config.action_start_index)
+    steps = config.action_chunk_length
+    if steps is None:
+        steps = available if full_chunk else int(config.replan_steps)
+    steps = int(steps)
+    if steps < 1:
+        raise ValueError("action chunk length must be positive")
+    if steps > available:
+        raise ValueError(
+            f"action chunk length {steps} exceeds the {available} predicted "
+            f"steps left after action_start_index {config.action_start_index}"
+        )
+    if config.replan_steps > steps:
+        raise ValueError(
+            f"replan_steps ({config.replan_steps}) must not exceed the returned "
+            f"action chunk ({steps})"
+        )
+    return steps
 
 
 def build_infer_config(config: RoboDojoPolicyConfig):
@@ -165,6 +198,9 @@ def build_infer_config(config: RoboDojoPolicyConfig):
 class WallXRoboDojoPolicy:
     """Stateless flow policy: each request is answered from its own observation."""
 
+    #: Plain policy keeps its published convention: one replan's worth of actions.
+    returns_full_chunk = False
+
     def __init__(self, config: RoboDojoPolicyConfig, infer_config=None):
         from wall_x._vendor.harrix.utils.dataset_v2 import (
             resolve_relative_action_frame,
@@ -177,6 +213,9 @@ class WallXRoboDojoPolicy:
             raise ValueError(f"action_start_index must be in [0, {horizon})")
         if config.replan_steps < 1:
             raise ValueError("replan_steps must be positive")
+        self.action_steps = resolve_action_steps(
+            config, horizon, full_chunk=self.returns_full_chunk
+        )
         self.relative_action_frame = resolve_relative_action_frame(
             self.infer_config.data_config
         )
@@ -185,9 +224,11 @@ class WallXRoboDojoPolicy:
         self._pending = None
         self._pending_batch = None
         logger.info(
-            "RoboDojo policy ready: horizon=%d start=%d replan=%d frame=%s norm_key=%s",
+            "RoboDojo policy ready: horizon=%d start=%d chunk=%d replan=%d "
+            "frame=%s norm_key=%s",
             horizon,
             config.action_start_index,
+            self.action_steps,
             config.replan_steps,
             self.relative_action_frame,
             config.norm_key,
@@ -299,7 +340,7 @@ class WallXRoboDojoPolicy:
 
     def _actions(self, data) -> list[dict[str, np.ndarray]]:
         start = self.config.action_start_index
-        stop = start + self.config.replan_steps
+        stop = start + self.action_steps
         per_side = {}
         for side in SIDES:
             pos, rot = self._absolute_arm(data, side)
