@@ -52,6 +52,14 @@ def parse_args(argv=None) -> argparse.Namespace:
         "plain policy and to the checkpoint's full action horizon for "
         "keyframe-memory checkpoints.",
     )
+    p.add_argument(
+        "--image-resize",
+        choices=("training", "serving"),
+        default="training",
+        help="training: one bicubic resize from the original frame (data-pipeline "
+        "behaviour). serving: the in-house server's two-stage resize, use it when "
+        "the checkpoint was evaluated against that preprocessing.",
+    )
     p.add_argument("--default-instruction", default="", help="Used when an observation has no instruction.")
     p.add_argument("--enable-jpeg-ndarray-v1", action="store_true")
     p.add_argument("--ws-ping-interval-s", type=optional_float, default=None)
@@ -112,6 +120,7 @@ def main(argv=None) -> None:
         action_start_index=args.action_start_index,
         replan_steps=args.replan_steps,
         action_chunk_length=args.action_chunk_length,
+        image_resize=args.image_resize,
         default_instruction=args.default_instruction,
     )
     # Configs only (no weights); handed to the policy so it is loaded once.

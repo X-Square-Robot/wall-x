@@ -244,7 +244,10 @@ def build_inference_data_config(
         epilogue_params=epilogue_params,
         state_bins=int(get("state_bins", 256)),
         max_seq_length=int(get("max_seq_length", 2048)),
-        padding_side=str(get("padding_side", "left")),
+        # The checkpoint records this under the epilogue processor params
+        # (``data.dataset_config_effective.dataset.processors.epilogue.params``);
+        # an explicit ``data.padding_side`` still wins if one is present.
+        padding_side=str(get("padding_side", epilogue_params.get("padding_side", "left"))),
         use_state_string_representation=bool(
             get("use_state_string_representation", False)
         ),

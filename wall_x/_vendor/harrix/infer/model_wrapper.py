@@ -461,11 +461,9 @@ class WallxModelWrapper:
         dataset_names = [self.norm_dataset_key] * batch_size
         self.logger.debug("[NormDebug] dataset_names=%s", dataset_names)
         is_dataset_v2 = self.config.cfg.data.dataset_type == "x2robot_v2"
-        padding_side = (
-            getattr(self.config.data_config, "padding_side", "right")
-            if is_dataset_v2
-            else "left"
-        )
+        # ``padding_side`` is a real field on the data config, resolved from the
+        # checkpoint (see build_inference_data_config); no dataset_type guess.
+        padding_side = self.config.data_config.padding_side
         state_bins = getattr(
             self.config.data_config,
             "state_bins",
@@ -828,6 +826,8 @@ class WallxModelWrapper:
         return self._resize_camera_images(observation)
 
     def _resize_camera_images(self, observation):
+        if getattr(self.config, "image_resize", "training") == "serving":
+            return self._resize_images_serving(observation)
         if ENABLE_GPU_RESIZE:
             return self._resize_images_gpu(observation)
         if ENABLE_FAST_PREPROCESS:
@@ -837,6 +837,53 @@ class WallxModelWrapper:
     def _action_prompt(self, observation, instruction):
         """(prefix, postfix) text of a flow-action request for ``observation``."""
         return self.get_text_for_action(instruction)
+
+    def _resize_images_serving(self, observation):
+        """Reproduce the deployed preprocessing exactly.
+
+        The in-house server resizes twice -- once to the configured camera
+        resolution, once to the ``smart_resize`` grid -- with Pillow's default
+        (bicubic) filter, then hands the GPU tensor to the image processor. A
+        single resize from the original image is the training-time behaviour and
+        is what ``image_resize="training"`` does, but the two differ by a grey
+        level or two, which is enough to move a contact-rich rollout. Serving a
+        checkpoint that was evaluated this way therefore needs this path.
+        """
+        image_inputs = []
+        for key in self.cam_names:
+            if key not in observation:
+                continue
+            current_obs = observation[key]
+            if isinstance(current_obs, np.ndarray):
+                img_pil = Image.fromarray(current_obs)
+            elif isinstance(current_obs, Image.Image):
+                img_pil = current_obs
+            else:
+                raise ValueError(f"Unsupported image type: {type(current_obs)}")
+            orig_width, orig_height = img_pil.size
+            target_size = self.config.data_config.resolution.get(key, -1)
+            if target_size != -1:
+                if orig_width > orig_height:
+                    new_width = target_size
+                    new_height = int(target_size * orig_height / orig_width)
+                else:
+                    new_height = target_size
+                    new_width = int(target_size * orig_width / orig_height)
+                img_pil = img_pil.resize((new_width, new_height))
+
+            current_width, current_height = img_pil.size
+            resized_height, resized_width = qwen_smart_resize(
+                current_height,
+                current_width,
+                factor=self.config.data_config.image_factor,
+                min_pixels=self.config.data_config.min_pixels,
+                max_pixels=self.config.data_config.max_pixels,
+            )
+            resized_img = img_pil.resize((resized_width, resized_height))
+            image_inputs.append(
+                torch.from_numpy(np.array(resized_img)).to(self.config.model_device)
+            )
+        return image_inputs
 
     @timer
     def _resize_images(self, observation):
@@ -976,6 +1023,8 @@ class WallxModelWrapper:
         return image_inputs
 
     def _passes_pil_images(self):
+        if getattr(self.config, "image_resize", "training") == "serving":
+            return False
         qwen_types = ("qwen3", "qwen3_5")
         return (
             getattr(self.config.data_config, "vision_processor_type", "")
@@ -1226,6 +1275,10 @@ class WallxModelWrapper:
         fp32, so invoking it without autocast produces a bf16/float LayerNorm
         dtype mismatch.
         """
+        # The reference serving stack runs the fp32 weights without autocast;
+        # WALLX_INFERENCE_AUTOCAST=0 reproduces that exactly.
+        if os.environ.get("WALLX_INFERENCE_AUTOCAST", "1") == "0":
+            return contextlib.nullcontext()
         device_type = str(self.config.model_device).split(":", 1)[0]
         if self.model_type == "qwen3_5" and device_type == "cuda":
             return torch.autocast(device_type="cuda", dtype=torch.bfloat16)

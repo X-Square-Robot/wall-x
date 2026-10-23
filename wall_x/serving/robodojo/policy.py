@@ -18,6 +18,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+import os
+
 import numpy as np
 
 from wall_x.serving.robodojo.protocol.exceptions import ErrorCode, WsError
@@ -52,6 +54,81 @@ def quat_wxyz_to_matrix(quat: np.ndarray) -> np.ndarray:
             [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
         ]
     )
+
+
+# The reference serving stack builds the state's 6D rotation from the observation
+# quaternion in float32; this module does it in float64. Both use the same formula,
+# so they agree to ~1e-7 — enough to vanish once the state is quantised into the
+# model's 255 state bins (the forward pass is bit-identical either way), but the
+# same 6D is also the base for decoding body-frame relative actions, where the
+# difference lands directly in the returned orientation. Set
+# WALLX_ROT6D_REF_COMPAT=1 to reproduce the reference stack bit-for-bit; float64
+# stays the default because it is the more accurate conversion.
+# Pose conversions follow the stack the checkpoint was trained and served with:
+# the observation quaternion becomes the state 6D in float32, the body-frame
+# composition runs in float64, and the returned quaternion is float32. This
+# reproduces the reference serving stack bit-for-bit. Set WALLX_POSE_FP64=1 to
+# use the float64 quaternion path instead (more precise, not bit-reproducible).
+_STATE_ROT6D_FP32 = os.environ.get("WALLX_POSE_FP64") != "1"
+
+
+def _state_rot6d_fp32(quat: np.ndarray) -> np.ndarray:
+    """float32 quaternion(wxyz) -> row-major 6D; mirrors the reference stack."""
+    q = np.asarray(quat, dtype=np.float32).reshape(4)
+    norm = float(np.linalg.norm(q))
+    if norm < 1e-8:
+        _invalid("end-effector quaternion must be nonzero")
+    w, x, y, z = [float(v) for v in (q / norm)]
+    return np.array(
+        [
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y - w * z),
+            2.0 * (x * z + w * y),
+            2.0 * (x * y + w * z),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z - w * x),
+        ],
+        dtype=np.float32,
+    )
+
+
+def rot6d_to_quat_wxyz_ref_compat(rot6d: np.ndarray) -> np.ndarray:
+    """float32 6D -> quaternion(wxyz); mirrors the reference stack bit-for-bit."""
+    r = np.asarray(rot6d, dtype=np.float32).reshape(-1)
+    r1, r2 = r[:3], r[3:]
+    n1 = float(np.linalg.norm(r1))
+    r1 = np.array([1.0, 0.0, 0.0], dtype=np.float32) if n1 < 1e-8 else r1 / n1
+    r2 = r2 - float(np.dot(r2, r1)) * r1
+    n2 = float(np.linalg.norm(r2))
+    if n2 < 1e-8:
+        fb = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        r2 = fb - float(np.dot(fb, r1)) * r1
+        n2 = float(np.linalg.norm(r2))
+        r2 = np.array([0.0, 0.0, 1.0], dtype=np.float32) if n2 < 1e-8 else r2 / n2
+    else:
+        r2 = r2 / n2
+    r3 = np.cross(r1, r2)
+    n3 = float(np.linalg.norm(r3))
+    r3 = np.array([0.0, 0.0, 1.0], dtype=np.float32) if n3 < 1e-8 else r3 / n3
+    r2 = np.cross(r3, r1)
+    r2 = r2 / (float(np.linalg.norm(r2)) + 1e-8)
+    m = np.stack([r1, r2, r3], axis=0).astype(np.float32)
+    trace = float(m[0, 0] + m[1, 1] + m[2, 2])
+    if trace > 0.0:
+        sc = np.sqrt(trace + 1.0) * 2.0
+        q = (0.25 * sc, (m[2, 1] - m[1, 2]) / sc, (m[0, 2] - m[2, 0]) / sc, (m[1, 0] - m[0, 1]) / sc)
+    elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+        sc = np.sqrt(max(1.0 + m[0, 0] - m[1, 1] - m[2, 2], 1e-8)) * 2.0
+        q = ((m[2, 1] - m[1, 2]) / sc, 0.25 * sc, (m[0, 1] + m[1, 0]) / sc, (m[0, 2] + m[2, 0]) / sc)
+    elif m[1, 1] > m[2, 2]:
+        sc = np.sqrt(max(1.0 + m[1, 1] - m[0, 0] - m[2, 2], 1e-8)) * 2.0
+        q = ((m[0, 2] - m[2, 0]) / sc, (m[0, 1] + m[1, 0]) / sc, 0.25 * sc, (m[1, 2] + m[2, 1]) / sc)
+    else:
+        sc = np.sqrt(max(1.0 + m[2, 2] - m[0, 0] - m[1, 1], 1e-8)) * 2.0
+        q = ((m[1, 0] - m[0, 1]) / sc, (m[0, 2] + m[2, 0]) / sc, (m[1, 2] + m[2, 1]) / sc, 0.25 * sc)
+    qa = np.array(q, dtype=np.float32)
+    n = float(np.linalg.norm(qa))
+    return qa if n < 1e-8 else qa / n
 
 
 def rot6d_to_matrix(rot6d: np.ndarray) -> np.ndarray:
@@ -146,6 +223,11 @@ class RoboDojoPolicyConfig:
     replan_steps: int = 16
     action_chunk_length: int | None = None
     default_instruction: str = ""
+    # "training": one bicubic resize from the original image (what the data
+    # pipeline does). "serving": the deployed two-stage resize, needed when a
+    # checkpoint was evaluated through the in-house server (it shifts pixels by
+    # a grey level or two, which matters for contact-rich tasks).
+    image_resize: str = "training"
 
 
 def resolve_action_steps(
@@ -192,7 +274,12 @@ def build_infer_config(config: RoboDojoPolicyConfig):
     )
     if config.action_horizon is not None:
         infer_kwargs["action_horizon"] = config.action_horizon
-    return InferConfig(**infer_kwargs)
+    infer_config = InferConfig(**infer_kwargs)
+    image_resize = config.image_resize
+    if image_resize not in ("training", "serving"):
+        raise ValueError(f"unknown image_resize {image_resize!r}")
+    infer_config.image_resize = image_resize
+    return infer_config
 
 
 class WallXRoboDojoPolicy:
@@ -295,7 +382,11 @@ class WallXRoboDojoPolicy:
 
         data = RobotStateActionData(config=self.infer_config)
         for side, (pose, grip) in arms.items():
-            rot6d = quat_wxyz_to_matrix(pose[3:])[:2].reshape(6)
+            rot6d = (
+                _state_rot6d_fp32(pose[3:])
+                if _STATE_ROT6D_FP32
+                else quat_wxyz_to_matrix(pose[3:])[:2].reshape(6)
+            )
             data.save_state_data_with_key(
                 pose[None, :3].astype(np.float32), f"follow_{side}_ee_cartesian_pos"
             )
@@ -313,13 +404,14 @@ class WallXRoboDojoPolicy:
         from wall_x._vendor.x2robot_utils import geometry
 
         values = data.data
-        state_pos = np.asarray(values[f"state_{side}_ee_cartesian_pos"], dtype=np.float64)
-        state_rot = np.asarray(values[f"state_{side}_ee_rotation_6D"], dtype=np.float64)
+        _DT = np.float32 if _STATE_ROT6D_FP32 else np.float64
+        state_pos = np.asarray(values[f"state_{side}_ee_cartesian_pos"], dtype=_DT)
+        state_rot = np.asarray(values[f"state_{side}_ee_rotation_6D"], dtype=_DT)
         rel_pos = dict.get(values, f"action_{side}_ee_cartesian_pos_relative")
         rel_rot = dict.get(values, f"action_{side}_ee_rotation_6D_relative")
         if rel_pos is not None and rel_rot is not None:
-            rel_pos = np.asarray(rel_pos, dtype=np.float64).reshape(-1, 3)
-            rel_rot = np.asarray(rel_rot, dtype=np.float64).reshape(-1, 6)
+            rel_pos = np.asarray(rel_pos, dtype=_DT).reshape(-1, 3)
+            rel_rot = np.asarray(rel_rot, dtype=_DT).reshape(-1, 6)
             if self.relative_action_frame == "body":
                 pos = body_frame.compose_body_delta_to_abs_pos(rel_pos, state_pos, state_rot)
                 rot = body_frame.compose_body_delta_to_abs_6d(rel_rot, state_rot)
@@ -345,7 +437,12 @@ class WallXRoboDojoPolicy:
         for side in SIDES:
             pos, rot = self._absolute_arm(data, side)
             grip = np.asarray(data.data[f"action_{side}_gripper"], dtype=np.float64)
-            quat = np.stack([matrix_to_quat_wxyz(rot6d_to_matrix(r)) for r in rot])
+            quat = np.stack([
+                rot6d_to_quat_wxyz_ref_compat(r)
+                if _STATE_ROT6D_FP32
+                else matrix_to_quat_wxyz(rot6d_to_matrix(r))
+                for r in rot
+            ])
             pose = np.concatenate([pos, quat], axis=1)[start:stop]
             grip = grip.reshape(-1, 1)[start:stop]
             if not (np.isfinite(pose).all() and np.isfinite(grip).all()):
