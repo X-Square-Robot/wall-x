@@ -14,11 +14,10 @@ in the frame named by the checkpoint's ``relative_action_frame``
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
-
-import os
 
 import numpy as np
 
@@ -56,14 +55,6 @@ def quat_wxyz_to_matrix(quat: np.ndarray) -> np.ndarray:
     )
 
 
-# The reference serving stack builds the state's 6D rotation from the observation
-# quaternion in float32; this module does it in float64. Both use the same formula,
-# so they agree to ~1e-7 — enough to vanish once the state is quantised into the
-# model's 255 state bins (the forward pass is bit-identical either way), but the
-# same 6D is also the base for decoding body-frame relative actions, where the
-# difference lands directly in the returned orientation. Set
-# WALLX_ROT6D_REF_COMPAT=1 to reproduce the reference stack bit-for-bit; float64
-# stays the default because it is the more accurate conversion.
 # Pose conversions follow the stack the checkpoint was trained and served with:
 # the observation quaternion becomes the state 6D in float32, the body-frame
 # composition runs in float64, and the returned quaternion is float32. This
@@ -404,14 +395,14 @@ class WallXRoboDojoPolicy:
         from wall_x._vendor.x2robot_utils import geometry
 
         values = data.data
-        _DT = np.float32 if _STATE_ROT6D_FP32 else np.float64
-        state_pos = np.asarray(values[f"state_{side}_ee_cartesian_pos"], dtype=_DT)
-        state_rot = np.asarray(values[f"state_{side}_ee_rotation_6D"], dtype=_DT)
+        dtype = np.float32 if _STATE_ROT6D_FP32 else np.float64
+        state_pos = np.asarray(values[f"state_{side}_ee_cartesian_pos"], dtype=dtype)
+        state_rot = np.asarray(values[f"state_{side}_ee_rotation_6D"], dtype=dtype)
         rel_pos = dict.get(values, f"action_{side}_ee_cartesian_pos_relative")
         rel_rot = dict.get(values, f"action_{side}_ee_rotation_6D_relative")
         if rel_pos is not None and rel_rot is not None:
-            rel_pos = np.asarray(rel_pos, dtype=_DT).reshape(-1, 3)
-            rel_rot = np.asarray(rel_rot, dtype=_DT).reshape(-1, 6)
+            rel_pos = np.asarray(rel_pos, dtype=dtype).reshape(-1, 3)
+            rel_rot = np.asarray(rel_rot, dtype=dtype).reshape(-1, 6)
             if self.relative_action_frame == "body":
                 pos = body_frame.compose_body_delta_to_abs_pos(rel_pos, state_pos, state_rot)
                 rot = body_frame.compose_body_delta_to_abs_6d(rel_rot, state_rot)

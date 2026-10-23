@@ -157,6 +157,30 @@ bash scripts/run_serving.sh \
 
 `workspace/example/desktop/qwen3_5_2B_desktop.yml` 是 Qwen3.5-2B checkpoint 的完整双臂 desktop 配置。提示词可通过 `data.system_prompt`（系统消息）和 `data.instruction_label`（任务文本前的标签，默认 `Instruction`）配置；LeRobot 训练和推理读取同一组字段，需与 checkpoint 训练时保持一致。
 
+## RoboDojo 服务
+
+`wall_x.serving.robodojo` 通过 XPolicyLab WebSocket 协议把 checkpoint 提供给
+[RoboDojo](https://robodojo-benchmark.com) 评测，由 XPolicyLab 的 `WallX` 策略适配器调用。
+关键帧记忆 checkpoint 会从配置中自动识别，记忆状态由客户端持有（请求格式见
+`wall_x/serving/robodojo/memory_protocol.py`）：每个请求自带所属 episode 的记忆状态，
+服务端在请求之间不保存任何状态，因此 `infer_batch` 可以把多个仿真环境的请求合成一次前向。
+
+```bash
+python -m wall_x.serving.robodojo.serve \
+  --checkpoint-path <path/to/checkpoint> --norm-key ex_normal --port 43865 \
+  --image-resize serving
+```
+
+- `--replan-steps` 是客户端每次请求后前进的步数（默认 16）；`--action-chunk-length`
+  是每次请求返回的动作数（关键帧记忆 checkpoint 默认返回完整 horizon，其他默认等于
+  `--replan-steps`）。
+- `--image-resize serving` 复现发布的 RoboDojo 成绩所用的两级缩放；`training` 为数据管线的单次缩放。
+- refiner 设置（`vla_config.refiner.refine_loops`、`refine_step_scale`）从 checkpoint 配置读取。
+- 位姿转换与参考实现一致（状态 6D 与返回的四元数为 float32）；设置 `WALLX_POSE_FP64=1` 使用 float64 路径。
+- 要逐位复现发布的成绩，还需要 `flash-linear-attention==0.4.2`（已在 `requirements.txt` 中固定），
+  并在安装时编译 CUDA 算子（`wall_x/model/core/ops/csrc`，见环境安装）。未编译时运行 PyTorch 回退实现，
+  结果在浮点误差范围内一致，但不逐位相同。
+
 ## Open-Loop WebSocket 评测
 
 ```bash

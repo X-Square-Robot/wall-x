@@ -207,6 +207,40 @@ through `data.system_prompt` (the system message) and `data.instruction_label`
 inference read the same keys, so set them to whatever the checkpoint was
 trained with.
 
+### RoboDojo Serving
+
+`wall_x.serving.robodojo` serves a checkpoint to
+[RoboDojo](https://robodojo-benchmark.com) through the XPolicyLab WebSocket
+protocol; the XPolicyLab `WallX` policy adapter drives it. Keyframe-memory
+checkpoints are detected from their config and served with client-held memory
+(see `wall_x/serving/robodojo/memory_protocol.py` for the request format):
+each request carries its episode's memory state, so the server keeps nothing
+between requests and `infer_batch` can answer several simulator environments
+in one forward pass.
+
+```bash
+python -m wall_x.serving.robodojo.serve \
+  --checkpoint-path <path/to/checkpoint> --norm-key ex_normal --port 43865 \
+  --image-resize serving
+```
+
+- `--replan-steps` is how far the client advances per request (default 16);
+  `--action-chunk-length` is how many actions a request returns (defaults to
+  the full horizon for keyframe-memory checkpoints, to `--replan-steps`
+  otherwise).
+- `--image-resize serving` reproduces the two-stage resize the released
+  RoboDojo numbers were produced with; `training` is the single resize of the
+  data pipeline.
+- The checkpoint's refiner settings (`vla_config.refiner.refine_loops`,
+  `refine_step_scale`) are read from its config.
+- Pose conversions follow the reference stack (float32 state 6D and returned
+  quaternion); set `WALLX_POSE_FP64=1` for the float64 path.
+- Reproducing the released numbers exactly also needs
+  `flash-linear-attention==0.4.2` (pinned in `requirements.txt`) and the CUDA
+  operators built at install time (`wall_x/model/core/ops/csrc`, see
+  Installation). Without the build the PyTorch fallbacks run; they agree within
+  floating-point tolerance but are not bit-identical.
+
 ### Open-Loop WebSocket Evaluation
 
 To compare predictions from a running Wall-X WebSocket server against LeRobot
