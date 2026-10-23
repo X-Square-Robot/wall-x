@@ -32,7 +32,7 @@ regex>=2024.4.16
 imageio>=2.34,<3
 imageio-ffmpeg>=0.5,<0.7
 # Qwen3.5 linear attention (GatedDeltaNet)
-flash-linear-attention==0.5.2
+flash-linear-attention==0.4.2
 # LeRobot 0.4.4 runtime deps (lerobot itself is installed with --no-deps)
 av>=14,<18
 jsonlines>=4,<5

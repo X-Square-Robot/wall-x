@@ -21,13 +21,11 @@ import torch
 logger = logging.getLogger(__name__)
 
 # ops is the sole boundary that touches external_accel: import the kernel directly
-# here (capability-based — present in the loaded build => used). The current
-# external_accel build does not ship this kernel yet, so dispatch resolves to the
-# PyTorch fallback below.
-try:
-    from external_accel import qwen35_rvq_position_ids as _external_accel_rvq_position_ids
-except Exception:
-    _external_accel_rvq_position_ids = None
+# here (capability-based — present in the build => used); without a build,
+# dispatch resolves to the PyTorch fallback below.
+from wall_x.model.core.ops.base import load_kernels
+
+_external_accel_rvq_position_ids = getattr(load_kernels(), "qwen35_rvq_position_ids", None)
 
 
 def qwen35_rvq_position_ids_available() -> bool:

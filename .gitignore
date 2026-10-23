@@ -37,3 +37,6 @@ ckpt/
 #   wall_x/model/core/ops/csrc/
 #   wall_x/model/core/ops/_cuda_ext.py
 #   wall_x/model/core/ops/_cuda_wrappers.py
+
+# Compiled CUDA operators
+*.so

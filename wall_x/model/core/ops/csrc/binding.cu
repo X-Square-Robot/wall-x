@@ -1,0 +1,81 @@
+// Operators built with -O3 --use_fast_math.
+// All sources of this module are compiled as one translation unit.
+
+#include "normalization/rmsnorm_kernel.cu"
+#include "layernorm/layernorm_kernel.cu"
+#include "layernorm/scaled_add_layernorm_kernel.cu"
+#include "silu_and_mul/silu_and_mul.cu"
+#include "two_expert_scatter/two_expert_scatter.cu"
+#include "permute/permute.cu"
+#include "m_rope/m_rope_kernel.cu"
+#include "rot_pos/rot_pos.cu"
+#include "get_rope_index/get_rope_index.cu"
+#include "window_index/window_index.cu"
+#include "qwen35_get_rope_index/qwen35_get_rope_index.cu"
+#include "qwen35_attention_mask/qwen35_attention_mask.cu"
+#include "gated_delta_pack/gated_delta_pack.cu"
+#include "qwen35_vla_qkv_postprocess/qwen35_vla_qkv_postprocess.cu"
+#include "qwen35_rvq_position_ids/qwen35_rvq_position_ids.cu"
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("rmsnorm", &wallx_cuda_rmsnorm::RMSNorm);
+  m.def("rmsnorm_zero_centered", &wallx_cuda_rmsnorm::RMSNormZeroCentered);
+  m.def("rmsnorm_with_rstd", &wallx_cuda_rmsnorm::RMSNormWithRstd);
+  m.def("rmsnorm_zero_centered_with_rstd", &wallx_cuda_rmsnorm::RMSNormZeroCenteredWithRstd);
+  m.def("add_rmsnorm", &wallx_cuda_rmsnorm::AddRMSNorm);
+  m.def("add_rmsnorm_zero_centered", &wallx_cuda_rmsnorm::AddRMSNormZeroCentered);
+  m.def("add_rmsnorm_with_rstd", &wallx_cuda_rmsnorm::AddRMSNormWithRstd);
+  m.def("add_rmsnorm_zero_centered_with_rstd", &wallx_cuda_rmsnorm::AddRMSNormZeroCenteredWithRstd);
+  m.def("rmsnorm_backward", &wallx_cuda_rmsnorm::RMSNormBackward);
+  m.def("rmsnorm_zero_centered_backward", &wallx_cuda_rmsnorm::RMSNormZeroCenteredBackward);
+  m.def("rmsnorm_backward_with_rstd", &wallx_cuda_rmsnorm::RMSNormBackwardWithRstd);
+  m.def("rmsnorm_zero_centered_backward_with_rstd", &wallx_cuda_rmsnorm::RMSNormZeroCenteredBackwardWithRstd);
+  m.def("add_rmsnorm_backward", &wallx_cuda_rmsnorm::AddRMSNormBackward);
+  m.def("add_rmsnorm_zero_centered_backward", &wallx_cuda_rmsnorm::AddRMSNormZeroCenteredBackward);
+  m.def("add_rmsnorm_backward_with_rstd", &wallx_cuda_rmsnorm::AddRMSNormBackwardWithRstd);
+  m.def("add_rmsnorm_zero_centered_backward_with_rstd", &wallx_cuda_rmsnorm::AddRMSNormZeroCenteredBackwardWithRstd);
+  m.def("gated_rmsnorm", &wallx_cuda_rmsnorm::GatedRMSNorm);
+  m.def("gated_rmsnorm_backward", &wallx_cuda_rmsnorm::GatedRMSNormBackward);
+  m.def("gated_rmsnorm_with_rstd", &wallx_cuda_rmsnorm::GatedRMSNormWithRstd);
+  m.def("gated_rmsnorm_backward_with_rstd", &wallx_cuda_rmsnorm::GatedRMSNormBackwardWithRstd);
+  m.def("adarmsnorm", &wallx_cuda_rmsnorm::AdaRMSNorm);
+  m.def("adarmsnorm_backward", &wallx_cuda_rmsnorm::AdaRMSNormBackward);
+  m.def("layernorm", &wallx_cuda_layernorm::Layernorm);
+  m.def("scaled_add_layernorm", &wallx_cuda_scaled_add_layernorm::ScaledAddLayernorm);
+  m.def("scaled_add_layernorm_backward", &wallx_cuda_scaled_add_layernorm::ScaledAddLayernormBackward);
+  m.def("silu_and_mul", &wallx_cuda_silu_and_mul::SiluAndMul);
+  m.def("silu_and_mul_backward", &wallx_cuda_silu_and_mul::SiluAndMulBackward);
+  m.def("silu_and_mul_inplace", &wallx_cuda_silu_and_mul::SiluAndMulInplace);
+  m.def("silu_and_mul_split", &wallx_cuda_silu_and_mul::SiluAndMulSplit);
+  m.def("silu_and_mul_split_inplace", &wallx_cuda_silu_and_mul::SiluAndMulSplitInplace);
+  m.def("silu_and_mul_split_inplace_backward", &wallx_cuda_silu_and_mul::SiluAndMulSplitInplaceBackward);
+  m.def("two_expert_pack", &wallx_cuda_two_expert_scatter::TwoExpertPack);
+  m.def("two_expert_unpack", &wallx_cuda_two_expert_scatter::TwoExpertUnpack);
+  m.def("permute", &wallx_cuda_permute::MoePermuteTopKOp);
+  m.def("unpermute", &wallx_cuda_permute::MoeRecoverTopKOp);
+  m.def("unpermute_bwd", &wallx_cuda_permute::MoeRecoverTopKBwdOp);
+  m.def("cub_sort_pair_get_storage_bytes", &wallx_cuda_permute::CubSortPairGetStorageBytes);
+  m.def("m_rope", &wallx_cuda_m_rope::MRope);
+  m.def("m_rope_inplace", &wallx_cuda_m_rope::MRopeInplace);
+  m.def("m_rope_inplace_pack", &wallx_cuda_m_rope::MRopeInplacePack);
+  m.def("m_rope_inplace_pack_bwd", &wallx_cuda_m_rope::MRopeInplacePackBackward);
+  m.def("m_rope_inplace_cfg_cache_write", &wallx_cuda_m_rope::MRopeInplaceCfgCacheWrite);
+  m.def("m_rope_bwd", &wallx_cuda_m_rope::MRopeBackward);
+  m.def("get_token_counts", &wallx_cuda_rot_pos::GetTokenCounts);
+  m.def("rot_pos", &wallx_cuda_rot_pos::RotPosEmb);
+  m.def("get_rope_index", &wallx_cuda_get_rope_index::GetRopeIndex);
+  m.def("get_rope_index_getworkspace", &wallx_cuda_get_rope_index::GetRopeIndexGetWorkSpace);
+  m.def("get_window_index", &wallx_cuda_window_index::GetWindowIndex);
+  m.def("get_totals", &wallx_cuda_window_index::GetTotals);
+  m.def("qwen35_get_rope_index", &wallx_cuda_qwen35_get_rope_index::Qwen35GetRopeIndex);
+  m.def("qwen35_get_rope_index_getworkspace", &wallx_cuda_qwen35_get_rope_index::Qwen35GetRopeIndexGetWorkspace);
+  m.def("qwen35_update_joint_attention_flash_mask", &wallx_cuda_qwen35_attention_mask::Qwen35UpdateJointAttentionFlashMask);
+  m.def("qwen35_update_position_ids", &wallx_cuda_qwen35_attention_mask::Qwen35UpdatePositionIds);
+  m.def("gated_delta_post_conv_pack", &wallx_cuda_gated_delta_pack::GatedDeltaPostConvPack);
+  m.def("gated_delta_post_conv_pack_backward", &wallx_cuda_gated_delta_pack::GatedDeltaPostConvPackBackward);
+  m.def("gated_delta_post_conv_pack_preprocess", &wallx_cuda_gated_delta_pack::GatedDeltaPostConvPackPreprocess);
+  m.def("gated_delta_post_conv_pack_preprocess_backward", &wallx_cuda_gated_delta_pack::GatedDeltaPostConvPackPreprocessBackward);
+  m.def("qwen35_vla_qkv_norm_replace_forward", &wallx_cuda_qwen35_vla_qkv_postprocess::Qwen35VlaQkvNormReplaceForward);
+  m.def("qwen35_vla_qkv_norm_replace_backward", &wallx_cuda_qwen35_vla_qkv_postprocess::Qwen35VlaQkvNormReplaceBackward);
+  m.def("qwen35_rvq_position_ids", &wallx_cuda_qwen35_rvq_position_ids::Qwen35RvqPositionIds);
+}

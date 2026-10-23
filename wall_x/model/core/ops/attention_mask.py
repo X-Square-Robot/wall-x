@@ -4,17 +4,14 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-# ops is the sole boundary that touches external_accel: import the kernels directly
-# here (capability-based — present in the loaded build => used) and expose the
-# operators (kernel + PyTorch fallback) so higher layers import only from ops.
-try:
-    from external_accel import (
-        qwen35_update_joint_attention_flash_mask as _external_accel_update_flash_mask,
-        qwen35_update_position_ids as _external_accel_update_position_ids,
-    )
-except Exception:
-    _external_accel_update_flash_mask = None
-    _external_accel_update_position_ids = None
+# ops is the sole boundary that touches the compiled kernels: look them up here
+# (capability-based — present in the build => used) and expose the operators
+# (kernel + PyTorch fallback) so higher layers import only from ops.
+from wall_x.model.core.ops.base import load_kernels
+
+_kernels = load_kernels()
+_external_accel_update_flash_mask = getattr(_kernels, "qwen35_update_joint_attention_flash_mask", None)
+_external_accel_update_position_ids = getattr(_kernels, "qwen35_update_position_ids", None)
 
 
 def _handle_external_accel_attention_mask_error(exc):

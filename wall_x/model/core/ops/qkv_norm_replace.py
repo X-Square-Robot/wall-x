@@ -27,10 +27,9 @@ import torch
 
 from wall_x.model.core.ops.norm import rmsnorm as _rmsnorm
 
-try:
-    from external_accel import qwen35_vla_qkv_norm_replace_kernel as _kernel
-except Exception:
-    _kernel = None
+from wall_x.model.core.ops.base import load_kernels
+
+_kernel = getattr(load_kernels(), "qwen35_vla_qkv_norm_replace_kernel", None)
 
 
 def qkv_norm_replace_available(reference_tensor: torch.Tensor) -> bool:

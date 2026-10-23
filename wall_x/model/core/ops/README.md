@@ -1,25 +1,29 @@
 # `wall_x.model.core.ops` — operator boundary contract
 
-This package is the **single boundary** between wall-x and the internal
-`external_accel` kernel library. It is also a **public (open-source) module**: the
-open-source export ships `wall_x/model/core/ops/` but **not** `external_accel`, so the
-PyTorch fallback in each operator is the code path open-source users actually
-run. That makes the contract below load-bearing, not stylistic.
+This package is the **single boundary** between wall-x and its CUDA operators.
+The kernels live in `csrc/` and `setup.py` compiles them into two extension
+modules: `_cuda_ext_bin` (`-O3 --use_fast_math`) and `_cuda_ext_exact_bin` (IEEE
+rounding — `--fmad=false -prec-div=true -prec-sqrt=true --ftz=false` — for the rope
+and position-embedding kernels, which must round exactly like PyTorch).
+`_cuda_wrappers.py` holds their autograd wrappers and the public operator names.
+An install without the build runs the PyTorch fallback of every operator, which is
+why the contract below is load-bearing, not stylistic.
 
 ## The contract
 
-Every operator that can be accelerated by an external_accel kernel MUST:
+Every operator that has a CUDA kernel MUST:
 
-1. **Touch external_accel only here.** No module outside `core/ops/` may
-   `import external_accel` (directly or via `from external_accel import ...`). Higher layers
-   import the operator from `wall_x.model.core.ops`.
+1. **Touch the compiled kernels only here.** No module outside `core/ops/` may
+   import `_cuda_ext` / `_cuda_wrappers`. Higher layers import the operator from
+   `wall_x.model.core.ops`.
 
-2. **Import cleanly without external_accel.** Kernel access is wrapped so the module
-   imports on a machine with no external_accel:
-   - `OpsProxy` subclasses resolve lazily via `importlib.import_module`.
-   - Plain-function ops use `try: from external_accel import <sym> except Exception: <sym> = None`.
-   The `from external_accel import` line must be indented under `try` (never column-0),
-   so the open-source export grep guard passes.
+2. **Import cleanly without a build.** Kernel access goes through
+   `base.load_kernels()`, which returns `None` when the extension is not built (a
+   build that fails to load logs a warning instead of raising):
+   - `OpsProxy` subclasses name their kernel with `_external_accel_name` and may
+     adapt its signature in `_probe_external_accel`;
+   - plain-function ops read their kernel with
+     `getattr(load_kernels(), "<name>", None)`.
 
 3. **Own a self-contained PyTorch fallback.** The fallback lives **in this
    package**, computes the same result as the kernel, and is a **first-class,
