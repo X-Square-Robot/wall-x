@@ -1,0 +1,134 @@
+# ManipArena / CVPR dual-arm finetune example (6D relative action, 448px, 3 cameras).
+#
+# Replace every /path/to/* placeholder before training:
+#
+#   model.config_path           -> model architecture JSON (mot_flash_mask_causal_xloss.json)
+#   model.processor_path        -> Qwen2.5-VL-3B-Instruct directory
+#   model.pretrained_path       -> same as processor_path, or HuggingFace cache path
+#   data.lerobot_config.repo_id -> local LeRobot dataset root (cvpr_4tasks)
+#   data.norm_stats_path        -> q01/q99 normalization JSON
+#   checkpoint.save_path        -> writable directory for training checkpoints
+#   checkpoint.resume_from      -> Wall-OSS-0.5 pretrained .safetensors or checkpoint directory
+#
+# Compute norm stats first:
+#
+#   python scripts/compute_norm_stats.py \
+#     --train_config workspace/example/maniparena_example.yml \
+#     --data_root /path/to/cvpr_4tasks \
+#     --output_path /path/to/cvpr_4tasks_norm_stats.json
+#
+# Launch training (from repo root):
+#
+#   torchrun --nproc_per_node=<N> wall_x/trainer/fsdp_trainer/train_fsdp.py \
+#     --config workspace/example/maniparena_example.yml
+#
+# Strategy: keep dof / agent_pos totals at 26 to match the pretraining action space
+# via ``action_padding``. The lerobot collator right-pads real action / state dims;
+# loss does not flow through the padded tail.
+
+model_type: qwen2_5
+
+task:
+  # Dual-arm 6D relative action: 10 + 10 = 20, plus action_padding(6) = 26.
+  dof_config:
+    follow_left_ee_cartesian_pos_relative: 3
+    follow_left_ee_rotation_6D_relative: 6
+    follow_left_gripper: 1
+    follow_right_ee_cartesian_pos_relative: 3
+    follow_right_ee_rotation_6D_relative: 6
+    follow_right_gripper: 1
+    action_padding: 6
+  ar_dof_config:
+    follow_left_ee_cartesian_pos_relative: 3
+    follow_left_ee_rotation_6D_relative: 6
+    follow_left_gripper: 1
+    follow_right_ee_cartesian_pos_relative: 3
+    follow_right_ee_rotation_6D_relative: 6
+    follow_right_gripper: 1
+    action_padding: 6
+  agent_pos_config:
+    follow_left_ee_cartesian_pos: 3
+    follow_left_ee_rotation_6D: 6
+    follow_left_gripper: 1
+    follow_right_ee_cartesian_pos: 3
+    follow_right_ee_rotation_6D: 6
+    follow_right_gripper: 1
+    action_padding: 6
+  action_horizon: 32
+  action_horizon_flow: 32
+  use_state_string_representation: false
+
+model:
+  backbone: qwen2_5
+  config_path: /path/to/wall-oss-0.5/config.json
+  processor_path: /path/to/Qwen2.5-VL-3B-Instruct
+  pretrained_path: /path/to/Qwen2.5-VL-3B-Instruct
+  attn_deterministic: true
+  use_ema: false
+  flow_loss_weight: 1.0
+  ar_loss_weight: 0.01
+
+hyperparams:
+  num_epoch: 100
+  batch_size_per_gpu: 4
+  gradient_accumulation_steps: 4
+  seed: 10222
+  optimizer:
+    optimizer_type: adamw
+    learning_rate: 5.0e-05
+    max_grad_norm: 1.0
+    enable_grad_clip: true
+    betas: [0.9, 0.95]
+    weight_decay: 1.0e-8
+    eps: 1.0e-8
+  scheduler:
+    scheduler_type: cosine
+    num_warmup_steps: 1000
+    num_training_steps: 200000
+    min_lr: 1.0e-6
+
+distributed:
+  use_fsdp: true
+  use_mixed_precision: true
+  bf16: true
+
+data:
+  dataset_type: lerobot
+  lerobot_config:
+    repo_id: /path/to/cvpr_4tasks
+    root: null
+  key_mappings:
+    camera:
+      observation.images.faceImg: face_view
+      observation.images.leftImg: left_wrist_view
+      observation.images.rightImg: right_wrist_view
+    state: observation.state
+    action: action
+  norm_stats_path: /path/to/cvpr_4tasks_norm_stats.json
+  train_test_split: 0.95
+  num_workers: 4
+  max_length: 1024
+  resolution:
+    face_view: 448
+    left_wrist_view: 448
+    right_wrist_view: 448
+
+logging:
+  log_name: maniparena_ft
+  log_project: lerobot_maniparena_ft
+  log_entity: your_wandb_entity
+  use_wandb: true
+  log_interval: 10
+  save_interval: 2000
+  val_interval: 1000000
+  epoch_save_interval: 1
+
+checkpoint:
+  save_path: /path/to/cvpr_4tasks
+  # Single-file .safetensors loads as pretrain weights before FSDP wrapping.
+  # Use a checkpoint directory for full resume (optimizer / scheduler / RNG).
+  resume_from: /path/to/wall-oss-0.5/model.safetensors
+
+debug:
+  profile: false
+  nvtx: false

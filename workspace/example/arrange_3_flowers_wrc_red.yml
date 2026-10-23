@@ -1,0 +1,124 @@
+# Arrange-3-flowers (WRC red) Wall-OSS-0.5 finetune.
+#
+# Dual-arm only: 20-D relative EE 6D + grippers, plus action_padding(6) = 26
+# to match Wall-OSS-0.5. Chassis / height / head are NOT predicted (padded;
+# loss does not flow through the pad tail). Dataset may still store extra
+# dims; the loader keeps only the first 20.
+#
+# Compute norm stats first:
+#
+#   python scripts/compute_norm_stats.py \
+#     --train_config workspace/example/arrange_3_flowers_wrc_red.yml
+#
+# Launch (from repo root):
+#
+#   CUDA_VISIBLE_DEVICES=0,1,2,3 \
+#     torchrun --nproc_per_node=4 \
+#       wall_x/trainer/fsdp_trainer/train_fsdp.py \
+#       --config workspace/example/arrange_3_flowers_wrc_red.yml
+
+model_type: qwen2_5
+
+task:
+  # 20 (arms) + 6 (padding) = 26; no velocity / height / head.
+  dof_config:
+    follow_left_ee_cartesian_pos_relative: 3
+    follow_left_ee_rotation_6D_relative: 6
+    follow_left_gripper: 1
+    follow_right_ee_cartesian_pos_relative: 3
+    follow_right_ee_rotation_6D_relative: 6
+    follow_right_gripper: 1
+    action_padding: 6
+  ar_dof_config:
+    follow_left_ee_cartesian_pos_relative: 3
+    follow_left_ee_rotation_6D_relative: 6
+    follow_left_gripper: 1
+    follow_right_ee_cartesian_pos_relative: 3
+    follow_right_ee_rotation_6D_relative: 6
+    follow_right_gripper: 1
+    action_padding: 6
+  agent_pos_config:
+    follow_left_ee_cartesian_pos: 3
+    follow_left_ee_rotation_6D: 6
+    follow_left_gripper: 1
+    follow_right_ee_cartesian_pos: 3
+    follow_right_ee_rotation_6D: 6
+    follow_right_gripper: 1
+    action_padding: 6
+  action_horizon: 32
+  action_horizon_flow: 32
+  use_state_string_representation: false
+
+model:
+  backbone: qwen2_5
+  config_path: <path/to/wall-oss-0.5>/config.json
+  processor_path: <path/to/Qwen2.5-VL-3B-Instruct>
+  pretrained_path: <path/to/Qwen2.5-VL-3B-Instruct>
+  attn_deterministic: true
+  use_ema: false
+  flow_loss_weight: 1.0
+  ar_loss_weight: 0.01
+
+hyperparams:
+  num_epoch: 50
+  batch_size_per_gpu: 4
+  gradient_accumulation_steps: 4
+  seed: 10222
+  optimizer:
+    optimizer_type: adamw
+    learning_rate: 5.0e-05
+    max_grad_norm: 1.0
+    enable_grad_clip: true
+    betas: [0.9, 0.95]
+    weight_decay: 1.0e-8
+    eps: 1.0e-8
+  scheduler:
+    scheduler_type: cosine
+    num_warmup_steps: 1000
+    num_training_steps: 200000
+    min_lr: 1.0e-6
+
+distributed:
+  use_fsdp: true
+  use_mixed_precision: true
+  bf16: true
+
+data:
+  dataset_type: lerobot
+  lerobot_config:
+    repo_id: <path/to/data>/arrange_3_flowers_wrc_red_lerobot
+    root: null
+  key_mappings:
+    camera:
+      observation.images.faceImg: face_view
+      observation.images.leftImg: left_wrist_view
+      observation.images.rightImg: right_wrist_view
+    state: observation.state
+    action: action
+  norm_stats_path: <path/to/data>/arrange_3_flowers_wrc_red_norm_stats.json
+  train_test_split: 0.95
+  # CPFS + torch DataLoader workers may hit Errno 95; use 0 if that happens.
+  num_workers: 0
+  max_length: 1024
+  resolution:
+    face_view: 448
+    left_wrist_view: 448
+    right_wrist_view: 448
+
+logging:
+  log_name: arrange_3_flowers_wrc_red
+  log_project: wall_oss_flowers
+  log_entity: ""
+  use_wandb: true
+  log_interval: 10
+  save_interval: 2000
+  val_interval: 1000000
+  epoch_save_interval: 1
+
+checkpoint:
+  save_path: <path/to/ckpt>/arrange_3_flowers_wrc_red
+  resume_from: <path/to/wall-oss-0.5>/model.safetensors
+
+debug:
+  profile: false
+  nvtx: false

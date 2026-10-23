@@ -1,0 +1,15 @@
+# arrange_3_flowers_wrc_red 原始 x2robot 数据采集路径列表
+# 对应任务: 摆放 3 朵花（红玫瑰相关 instruction）
+#
+# 配套转换配置:
+#   workspace/data_config/arrange_3_flowers_wrc_red_x2robot2lerobot.json
+# 转换命令 (在 wall-x 仓库根目录):
+#   # 需 lerobot==0.4.4 (Python3.10 + CODEBASE_VERSION v3.0)
+#   python x2robot2lerobot.py --config workspace/data_config/arrange_3_flowers_wrc_red_x2robot2lerobot.json
+#
+# 输出目录见 JSON 中的 output_path（默认 <path/to/data>/arrange_3_flowers_wrc_red_lerobot）
+# 使用前请复制 JSON，填入 src_path_list 与 output_path。
+
+dataset_path:
+  - path: <path/to/x2robot_data>/collection_day_example
+  - path: <path/to/x2robot_data>/collection_night_example

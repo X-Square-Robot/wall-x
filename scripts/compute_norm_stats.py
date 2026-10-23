@@ -19,17 +19,17 @@ Recommended: pass a finetune YAML (paths in the config can be placeholders; over
 with CLI flags if needed)::
 
     python scripts/compute_norm_stats.py \\
-        --train_config workspace/example/fintune_bus2602/libero.yml
+        --train_config workspace/example/libero.yml
 
-CVPR / multi-task example::
+Qwen3.5 LeRobot template::
 
     python scripts/compute_norm_stats.py \\
-        --train_config workspace/example/fintune_bus2602/cvpr_example.yml
+        --train_config workspace/example/lerobot/qwen3_5_lerobot_template.yml
 
 Override dataset or output path from the command line::
 
     python scripts/compute_norm_stats.py \\
-        --train_config workspace/example/fintune_bus2602/libero.yml \\
+        --train_config workspace/example/libero.yml \\
         --data_root /path/to/repo_id \\
         --output_path /path/to/norm_stats_path
 
@@ -504,8 +504,8 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 examples:
-  %(prog)s --train_config workspace/example/fintune_bus2602/libero.yml
-  %(prog)s --train_config workspace/example/fintune_bus2602/cvpr_example.yml \\
+  %(prog)s --train_config workspace/example/libero.yml
+  %(prog)s --train_config workspace/example/lerobot/qwen3_5_lerobot_template.yml \\
       --data_root /path/to/repo_id --output_path /path/to/norm_stats_path
   %(prog)s --data_root /path/to/lerobot_dataset --output_path /path/to/norm_stats.json
 """,

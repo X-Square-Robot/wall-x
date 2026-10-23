@@ -1,0 +1,16 @@
+# Optional simulator runtime dependencies for scripts/run_libero.sh.
+# Install this file after requirements.txt. Do not install the full LIBERO
+# requirements.txt into the Wall-X environment because it pins older torch,
+# transformers, and numpy versions for LIBERO's training stack.
+robosuite==1.4.1
+bddl==1.0.1
+easydict==1.9
+cloudpickle==2.1.0
+gym==0.25.2
+future==0.18.2
+h5py>=3.11,<4
+imageio[ffmpeg]==2.37.3
+numpy>=1.26,<2
+opencv-python>=4.11,<4.12
+mujoco>=2.3.7,<3.0
+PyOpenGL>=3.1.0
