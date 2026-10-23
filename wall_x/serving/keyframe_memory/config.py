@@ -78,3 +78,14 @@ class KeyframeMemoryConfig:
 
     def short_term_taps(self, task_id: str) -> tuple:
         return tuple(self.short_term.get(self.task_family(task_id), (0, 1)))
+
+    def ring_plan(self, task_id: str) -> dict:
+        """What a client needs to send only the ring frames a request reads."""
+        return {
+            "span": self.ring_span,
+            "window": self.window,
+            "num_candidates": self.num_candidates,
+            "select_stride": self.select_stride,
+            "short_term": list(self.short_term_taps(task_id)),
+            "selection": self.uses_memory(task_id),
+        }

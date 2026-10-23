@@ -14,12 +14,21 @@ Request fields (inside the observation)::
                              ring: [{sim_frame, face_view}] for max(0,now-60)..now,
                              mem: [{sim_frame, face_view}] for the memory frames,
                              last_sel_frame, consec_skip, dump_count, rng_state,
-                             mem_boxes (optional, box tasks)}
+                             mem_boxes (optional, box tasks),
+                             ring_sparse (optional, see below)}
 
 Response field ``kfmem_state``: ``version``, ``prev_sim_frame``,
 ``mem_frame_ids``, ``last_sel_frame``, ``consec_skip``, ``dump_count``,
-``rng_state`` and, for box tasks, ``mem_boxes`` as ``{"<frame>": [x1,y1,x2,y2]}``.
-``dump_count`` is not used by this server and is echoed unchanged.
+``rng_state``, ``ring_plan`` and, for box tasks, ``mem_boxes`` as
+``{"<frame>": [x1,y1,x2,y2]}``. ``dump_count`` is not used by this server and is
+echoed unchanged.
+
+Sparse ring: the server reads only a few ring frames per request (the current
+frame, the selection candidates when a selection is due, the short-term taps).
+A client that has received a ``ring_plan`` may set ``ring_sparse: true`` and send
+just those frames (``state.needed_ring_frames``) and no ``kfmem_history``; the
+server checks that every frame it will read is present. The model inputs are
+the same as with the full ring.
 """
 
 from __future__ import annotations
@@ -32,7 +41,12 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from wall_x.serving.keyframe_memory.config import KeyframeMemoryConfig
-from wall_x.serving.keyframe_memory.state import Box, Frame, MemoryState
+from wall_x.serving.keyframe_memory.state import (
+    Box,
+    Frame,
+    MemoryState,
+    needed_ring_frames,
+)
 from wall_x.serving.robodojo.protocol.exceptions import ErrorCode, WsError
 
 STATE_KEY = "kfmem_client_state_v1"
@@ -86,6 +100,7 @@ class ClientRequest:
     dump_count: int
     # Boxes the client echoed; ``None`` if it sent none (older clients).
     client_boxes: Optional[Dict[int, Box]]
+    task_id: str = ""
 
 
 def initial_state(rng_state: Optional[bytes]) -> Dict[str, Any]:
@@ -115,14 +130,43 @@ def parse_request(
         previous = _frame_id(previous, "prev_sim_frame")
         if previous >= now:
             _invalid("prev_sim_frame must be less than sim_frame")
-    _check_history(obs.get(HISTORY_KEY, []), now, previous, max_advance)
+    last_select = _frame_id(raw.get("last_sel_frame"), "last_sel_frame")
+    if last_select > now:
+        _invalid("last_sel_frame must not exceed sim_frame")
+    task_id = str(obs.get("task_id") or "")
+    sparse = raw.get("ring_sparse", False)
+    if not isinstance(sparse, bool):
+        _invalid("ring_sparse must be a boolean")
+    if sparse:
+        if previous is None:
+            _invalid("an episode's first request must send the full ring")
+        if obs.get(HISTORY_KEY):
+            _invalid(f"a sparse-ring request must not send {HISTORY_KEY}")
+        if now - previous > max_advance:
+            _invalid("sim_frame must advance by the executed chunk length; reset between episodes")
+    else:
+        _check_history(obs.get(HISTORY_KEY, []), now, previous, max_advance)
 
+    oldest = max(0, now - config.ring_span)
     ring_raw = raw.get("ring")
     if not isinstance(ring_raw, list) or len(ring_raw) > config.ring_span + 1:
         _invalid(f"ring must be a list of at most {config.ring_span + 1} frames")
     ring = _frames(ring_raw, "ring")
-    expected = list(range(max(0, now - config.ring_span), now + 1))
-    if [f.index for f in ring] != expected:
+    indices = [f.index for f in ring]
+    if sparse:
+        if not indices or indices[-1] != now or indices[0] < oldest or any(
+            a >= b for a, b in zip(indices, indices[1:])
+        ):
+            _invalid(
+                f"a sparse ring must hold increasing frames within max(0,now-{config.ring_span})..now, "
+                "ending at now"
+            )
+        missing = sorted(
+            set(needed_ring_frames(config.ring_plan(task_id), now, last_select)) - set(indices)
+        )
+        if missing:
+            _invalid(f"sparse ring lacks frames {missing} read at frame {now}")
+    elif indices != list(range(oldest, now + 1)):
         _invalid(f"ring must contain every raw frame from max(0,now-{config.ring_span}) through now")
 
     mem_raw = raw.get("mem")
@@ -134,9 +178,6 @@ def parse_request(
     if len({f.index for f in memory}) != len(memory):
         _invalid("mem frame IDs must be unique")
 
-    last_select = _frame_id(raw.get("last_sel_frame"), "last_sel_frame")
-    if last_select > now:
-        _invalid("last_sel_frame must not exceed sim_frame")
     context_key = raw.get("context_key")
     if not isinstance(context_key, str) or not _CONTEXT_KEY.fullmatch(context_key):
         _invalid("context_key must match [A-Za-z0-9_-]{1,128}")
@@ -150,12 +191,14 @@ def parse_request(
             memory=memory,
             last_select_frame=last_select,
             consecutive_skips=_frame_id(raw.get("consec_skip"), "consec_skip"),
+            ring_start=oldest,
         ),
         previous_frame=previous,
         context_key=context_key,
         rng_state=rng_state,
         dump_count=_frame_id(raw.get("dump_count"), "dump_count"),
         client_boxes=_parse_boxes(raw.get("mem_boxes"), [f.index for f in memory]),
+        task_id=task_id,
     )
 
 
@@ -211,7 +254,11 @@ def _parse_boxes(raw: Any, memory_frames: list) -> Optional[Dict[int, Box]]:
 
 
 def response_state(
-    request: ClientRequest, *, rng_state: Optional[bytes], include_boxes: bool
+    request: ClientRequest,
+    *,
+    rng_state: Optional[bytes],
+    include_boxes: bool,
+    ring_plan: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     state = request.state
     out = {
@@ -223,6 +270,8 @@ def response_state(
         "dump_count": request.dump_count,
         "rng_state": rng_state,
     }
+    if ring_plan is not None:
+        out["ring_plan"] = dict(ring_plan)
     if include_boxes:
         out["mem_boxes"] = {
             str(f.index): list(state.boxes[f.index])

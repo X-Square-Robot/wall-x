@@ -87,6 +87,41 @@ class KeyframeMemoryModelWrapper(WallxModelWrapper):
         state: MemoryState,
     ) -> Tuple[Dict[str, Any], Optional[SelectionReport]]:
         """Run one request; ``state`` is updated in place by the selection pass."""
+        memory, report = self.prepare_memory(instruction, task_id, state)
+        output = self.infer_flow_action({**observation, MEMORY_KEY: memory}, instruction)
+        return output, report
+
+    def infer_with_memory_batch(
+        self,
+        requests: List[Tuple[Dict[str, Any], str, str, MemoryState]],
+        init_noises: Optional[List[torch.Tensor]] = None,
+    ) -> Tuple[List[Dict[str, Any]], List[Optional[SelectionReport]]]:
+        """Run several independent requests, one ``(observation, instruction,
+        task_id, state)`` each.
+
+        Selection runs request by request (it is greedy and touches only that
+        request's ``state``); the flow-action pass runs as one batch. With the
+        noise each request would have drawn on its own, every row gets the same
+        inputs as :meth:`infer_with_memory`.
+        """
+        prepared = [
+            self.prepare_memory(instruction, task_id, state)
+            for _, instruction, task_id, state in requests
+        ]
+        observations = [
+            {**observation, MEMORY_KEY: memory}
+            for (observation, _, _, _), (memory, _) in zip(requests, prepared)
+        ]
+        instructions = [instruction for _, instruction, _, _ in requests]
+        outputs = self.infer_flow_action_batch(
+            observations, instructions, init_noises=init_noises
+        )
+        return outputs, [report for _, report in prepared]
+
+    def prepare_memory(
+        self, instruction: str, task_id: str, state: MemoryState
+    ) -> Tuple[ActionMemory, Optional[SelectionReport]]:
+        """Selection pass when due, then the memory the action pass shows."""
         cfg = self.memory_config
         report = None
         memory = ActionMemory(frame_stamp=state.now if cfg.frame_stamp else None)
@@ -111,8 +146,7 @@ class KeyframeMemoryModelWrapper(WallxModelWrapper):
                 boxes=dict(state.boxes) if boxes else {},
                 frame_stamp=memory.frame_stamp,
             )
-        output = self.infer_flow_action({**observation, MEMORY_KEY: memory}, instruction)
-        return output, report
+        return memory, report
 
     # ------------------------------------------------------------------
     # Selection pass

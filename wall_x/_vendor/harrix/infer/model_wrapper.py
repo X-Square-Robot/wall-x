@@ -1246,13 +1246,15 @@ class WallxModelWrapper:
         )
         return model_output
 
-    def _generate_flow_from_model_input(self, model_input):
+    def _generate_flow_from_model_input(self, model_input, init_noise=None):
         generate_kwargs = {
             "action_horizon": self.config.action_horizon,
             "action_dim": self.config.action_dim,
             "num_inference_timesteps": self.config.num_inference_timesteps,
             **model_input,
         }
+        if init_noise is not None:
+            generate_kwargs["init_noise"] = init_noise
         if self.model_type != "qwen3_5":
             padding_list = []
             for dataset_name in model_input["dataset_names"]:
@@ -1302,12 +1304,15 @@ class WallxModelWrapper:
                 raise ValueError(f"Cannot merge model input field {key!r}")
         return merged
 
-    def infer_flow_action_batch(self, observations, instructions):
+    def infer_flow_action_batch(self, observations, instructions, init_noises=None):
         """Batched flow action inference.
 
         - observations: List[Dict], each in the single-sample observation format
         - instructions: List[str | Mapping]; a Mapping uses
           {"task": str, "subtask": str} (the legacy "detail" key is accepted)
+        - init_noises: optional List[Tensor], one ``[1, horizon, dim]`` initial
+          flow noise per sample. Passing the noise a single-sample call would
+          have drawn makes each row independent of what it is batched with.
 
         Returns List[model_output] with one entry per sample.
         """
@@ -1315,6 +1320,13 @@ class WallxModelWrapper:
             instructions
         ), "observations and instructions must have the same length"
         batch_size = len(observations)
+        if init_noises is not None and len(init_noises) != batch_size:
+            raise ValueError("init_noises must have one entry per observation")
+
+        def noise_for(indices):
+            if init_noises is None:
+                return None
+            return torch.cat([init_noises[index] for index in indices], dim=0)
 
         if self.model_type == "qwen3_5":
             # Qwen3.5's cached flow path requires every row to begin its action
@@ -1349,7 +1361,9 @@ class WallxModelWrapper:
                     batch_inputs = self._merge_model_inputs(
                         [sample_input for _, sample_input in entries]
                     )
-                    batch_output = self._generate_flow_from_model_input(batch_inputs)
+                    batch_output = self._generate_flow_from_model_input(
+                        batch_inputs, noise_for([index for index, _ in entries])
+                    )
                     for row, (index, _) in enumerate(entries):
                         predicted_by_index[index] = batch_output["predict_action"][
                             row : row + 1
@@ -1370,7 +1384,9 @@ class WallxModelWrapper:
                 observations, prefix_list, postfix_list
             )
             with ScopeTimer("generate_flow_action_batch"):
-                model_output = self._generate_flow_from_model_input(batch_inputs)
+                model_output = self._generate_flow_from_model_input(
+                    batch_inputs, noise_for(range(batch_size))
+                )
             predict_action = model_output["predict_action"]
 
         outputs = []

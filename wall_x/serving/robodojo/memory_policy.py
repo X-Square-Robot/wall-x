@@ -13,7 +13,7 @@ import contextlib
 import logging
 from collections import OrderedDict
 from collections.abc import Mapping
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 
@@ -80,8 +80,9 @@ class ClientRng:
 
 
 class KeyframeMemoryRoboDojoPolicy(WallXRoboDojoPolicy):
-    # Selection decisions are per episode; requests are served one at a time.
-    supports_batch_infer = False
+    # Every request carries its own episode state, so requests from different
+    # episodes can share the flow-action pass (see ``infer_batch``).
+    supports_batch_infer = True
     # The client advances by ``replan_steps``; the platform still wants the
     # complete chunk, so every request returns the whole prediction horizon.
     returns_full_chunk = True
@@ -126,6 +127,54 @@ class KeyframeMemoryRoboDojoPolicy(WallXRoboDojoPolicy):
         return initial_state(self._rng.initial)
 
     def update_obs(self, obs: Mapping[str, Any]) -> None:
+        self._pending = self._parse(obs)
+
+    def get_action(self) -> Dict[str, Any]:
+        if self._pending is None:
+            raise RuntimeError("get_action called before update_obs")
+        observation, instruction, task_id, request = self._pending
+        self._pending = None
+        boxes = self._attach_boxes(task_id, request)
+        with self._rng.loaded(request.rng_state) as export_rng:
+            output, report = self.model.infer_with_memory(
+                observation, instruction, task_id, request.state
+            )
+            rng_state = export_rng()
+        return self._respond(request, output, report, rng_state, boxes)
+
+    def infer_batch(self, observations) -> List[Dict[str, Any]]:
+        """Serve several episodes at once; one response per observation, in order.
+
+        Each response equals what ``update_obs`` + ``get_action`` returns for
+        that observation alone: selection runs per request, and each request's
+        initial flow noise is drawn from its own client RNG state exactly as
+        the single path draws it. Only the flow-action forward is shared.
+        """
+        if not isinstance(observations, (list, tuple)) or not observations:
+            _invalid("infer_batch needs a nonempty list of observations")
+        parsed = [self._parse(obs) for obs in observations]
+        boxes = [self._attach_boxes(task_id, request) for _, _, task_id, request in parsed]
+        noises, rng_states = [], []
+        for _, _, _, request in parsed:
+            with self._rng.loaded(request.rng_state) as export_rng:
+                noises.append(self._initial_noise())
+                rng_states.append(export_rng())
+        outputs, reports = self.model.infer_with_memory_batch(
+            [(observation, instruction, task_id, request.state)
+             for observation, instruction, task_id, request in parsed],
+            init_noises=noises,
+        )
+        return [
+            self._respond(request, output, report, rng_state, use_boxes)
+            for (_, _, _, request), output, report, rng_state, use_boxes in zip(
+                parsed, outputs, reports, rng_states, boxes
+            )
+        ]
+
+    # ------------------------------------------------------------------
+    # request handling shared by the single and batched paths
+    # ------------------------------------------------------------------
+    def _parse(self, obs: Mapping[str, Any]):
         if not isinstance(obs, Mapping):
             _invalid("observation must be a mapping")
         task_id = obs.get("task_id")
@@ -136,20 +185,23 @@ class KeyframeMemoryRoboDojoPolicy(WallXRoboDojoPolicy):
         )
         self._rng.validate(request.rng_state)
         observation, instruction = self._convert(obs)
-        self._pending = (observation, instruction, task_id, request)
+        return observation, instruction, task_id, request
 
-    def get_action(self) -> Dict[str, Any]:
-        if self._pending is None:
-            raise RuntimeError("get_action called before update_obs")
-        observation, instruction, task_id, request = self._pending
-        self._pending = None
+    def _attach_boxes(self, task_id: str, request: ClientRequest) -> bool:
         boxes = self.memory_config.uses_boxes(task_id)
         request.state.boxes = self._boxes_for(request) if boxes else {}
-        with self._rng.loaded(request.rng_state) as export_rng:
-            output, report = self.model.infer_with_memory(
-                observation, instruction, task_id, request.state
-            )
-            rng_state = export_rng()
+        return boxes
+
+    def _initial_noise(self) -> torch.Tensor:
+        """The flow noise the single path draws from the current CUDA generator."""
+        config = self.infer_config
+        return torch.randn(
+            (1, int(config.action_horizon), int(config.action_dim)),
+            dtype=torch.float32,
+            device=config.model_device,
+        )
+
+    def _respond(self, request, output, report, rng_state, boxes) -> Dict[str, Any]:
         if report is not None:
             logger.info(
                 "[%s] select t=%d %s slots=%s written=%s margin=%+.3f memory=%s",
@@ -165,7 +217,12 @@ class KeyframeMemoryRoboDojoPolicy(WallXRoboDojoPolicy):
             self._remember_boxes(request)
         return {
             "actions": self._actions(output["robot_state_action_data"]),
-            RESPONSE_KEY: response_state(request, rng_state=rng_state, include_boxes=boxes),
+            RESPONSE_KEY: response_state(
+                request,
+                rng_state=rng_state,
+                include_boxes=boxes,
+                ring_plan=self.memory_config.ring_plan(request.task_id),
+            ),
         }
 
     # ------------------------------------------------------------------

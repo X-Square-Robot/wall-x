@@ -39,10 +39,18 @@ class MemoryState:
     last_select_frame: int = 0
     consecutive_skips: int = 0
     boxes: Dict[int, Box] = field(default_factory=dict)
+    # First frame of the logical ring, ``max(0, now - ring_span)``. A client may
+    # send only the ring frames a request needs (see ``needed_ring_frames``), so
+    # ``ring[0]`` is not necessarily the oldest frame of the window.
+    ring_start: Optional[int] = None
 
     @property
     def now(self) -> int:
         return self.ring[-1].index
+
+    @property
+    def oldest(self) -> int:
+        return self.ring[0].index if self.ring_start is None else self.ring_start
 
 
 @dataclass(frozen=True)
@@ -129,11 +137,34 @@ class KeyframeBank:
         """Ring frames at ``now - stride * k`` for k = count..1, clamped to the ring."""
         if count <= 0:
             return []
-        oldest = state.ring[0].index
+        oldest = state.oldest
         return [
             _nearest(state.ring, max(oldest, state.now - k * stride))
             for k in range(count, 0, -1)
         ]
+
+
+def needed_ring_frames(plan: Dict, now: int, last_select_frame: int) -> List[int]:
+    """Ring frames a request at ``now`` reads, given the ``ring_plan`` of its task.
+
+    These are the current frame, the selection candidates when a selection is
+    due, and the short-term taps. Over a complete ring every one of them is an
+    exact frame index (the window lies inside the ring), so a request that
+    carries just these frames gives the server the same inputs as the full ring.
+    The client mirrors this arithmetic to decide what to send.
+    """
+    oldest = max(0, now - int(plan["span"]))
+    needed = {now}
+    if plan["selection"] and now - last_select_frame >= int(plan["select_stride"]):
+        start = max(0, now - int(plan["window"]))
+        span = max(1, now - start)
+        count = int(plan["num_candidates"])
+        needed.update(
+            min(max(start + int((i + 0.5) * span / count), oldest), now) for i in range(count)
+        )
+    taps, stride = (int(v) for v in plan["short_term"])
+    needed.update(max(oldest, now - k * stride) for k in range(taps, 0, -1))
+    return sorted(needed)
 
 
 def box_for(state: MemoryState, frame: Frame) -> Optional[Box]:
