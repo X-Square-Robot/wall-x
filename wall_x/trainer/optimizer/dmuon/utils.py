@@ -11,10 +11,15 @@ _logger = logging.getLogger(__name__)
 def _emit(log_fn, message, *args, level=logging.INFO):
     if args:
         message = message % args
-    if log_fn is not None:
-        log_fn(message, level=level)
-    else:
+    if log_fn is None:
         _logger.log(level, message)
+        return
+    if level >= logging.WARNING:
+        # log_fn flattens record levels; keep a real WARNING record for
+        # level-based filters/alerting alongside the display path.
+        _logger.log(level, message)
+    prefix = "WARNING: " if level >= logging.WARNING else ""
+    log_fn(f"{prefix}{message}")
 
 
 def _is_rank0():
@@ -51,6 +56,40 @@ def _build_ns_backend(dmuon, opt_cfg):
     )
 
 
+def _maybe_add_muon_kwarg(kwargs, signature, name, value):
+    if name in signature.parameters:
+        kwargs[name] = value
+        return True
+    return False
+
+
+def dmuon_dedicate_mesh_args(mesh):
+    """Return ``mesh`` and kwargs in the shape expected by DMuon."""
+
+    mesh_dim_names = tuple(getattr(mesh, "mesh_dim_names", ()) or ())
+    if "replicate" in mesh_dim_names and "shard" in mesh_dim_names:
+        return mesh["shard"], {"replicate_mesh": mesh["replicate"]}
+    if getattr(mesh, "ndim", 1) == 1:
+        return mesh, {}
+    raise ValueError(
+        "Unsupported FSDP2 mesh layout for DMuon: "
+        f"mesh_dim_names={mesh_dim_names!r}, ndim={getattr(mesh, 'ndim', None)!r}"
+    )
+
+
+def dmuon_owner_assignment_kwargs(opt_cfg):
+    """Return explicit owner-assignment kwargs for ``dmuon.dedicate_params``."""
+
+    if getattr(opt_cfg, "optimizer_type", None) != "dmuon":
+        return {}
+    return {
+        "owner_strategy": getattr(opt_cfg, "owner_strategy", "lpt"),
+        "owner_cost_model": getattr(opt_cfg, "owner_cost_model", "optimizer"),
+        "pack_small_params": bool(getattr(opt_cfg, "owner_pack_small_params", True)),
+        "hsdp_column_balance": bool(getattr(opt_cfg, "hsdp_column_balance", True)),
+    }
+
+
 def get_dmuon_optimizer(model, *, opt_cfg, param_groups=None, log_fn=None):
     """Build dmuon.Muon from a DMuonConfig.
 
@@ -77,12 +116,18 @@ def get_dmuon_optimizer(model, *, opt_cfg, param_groups=None, log_fn=None):
         )
 
     ns_backend = _build_ns_backend(dmuon, opt_cfg)
+    record_step_profile = bool(getattr(opt_cfg, "record_step_profile", False))
+    first_step_progress_log_limit = int(
+        getattr(opt_cfg, "first_step_progress_log_limit", 8)
+    )
 
     _emit(
         log_fn,
         "DMuon: Muon lr=%s momentum=%s ns_steps=%s; "
         "AdamW lr=%s betas=%s wd=%s; "
-        "ns_backend=%s ns_coefficients=%s nesterov=%s",
+        "ns_backend=%s ns_coefficients=%s nesterov=%s "
+        "record_step_profile=%s first_step_progress_log_limit=%s "
+        "replicate_async=%s group_prepare_ahead=%s forward_prefetch_depth=%s",
         opt_cfg.muon_lr,
         opt_cfg.momentum,
         opt_cfg.ns_steps,
@@ -92,6 +137,11 @@ def get_dmuon_optimizer(model, *, opt_cfg, param_groups=None, log_fn=None):
         opt_cfg.ns_backend,
         opt_cfg.ns_coefficients,
         opt_cfg.nesterov,
+        record_step_profile,
+        first_step_progress_log_limit,
+        opt_cfg.replicate_async,
+        opt_cfg.group_prepare_ahead,
+        opt_cfg.forward_prefetch_depth,
     )
     if param_groups is not None:
         _emit(
@@ -110,6 +160,25 @@ def get_dmuon_optimizer(model, *, opt_cfg, param_groups=None, log_fn=None):
     kwargs = {}
     if param_groups is not None:
         kwargs["param_groups"] = param_groups
+    optional_kwargs = {
+        "record_step_profile": record_step_profile,
+        "first_step_progress_log_limit": first_step_progress_log_limit,
+        "replicate_async": opt_cfg.replicate_async,
+        "group_prepare_ahead": opt_cfg.group_prepare_ahead,
+        "forward_prefetch_depth": opt_cfg.forward_prefetch_depth,
+    }
+    unsupported_kwargs = []
+    for name, value in optional_kwargs.items():
+        if not _maybe_add_muon_kwarg(kwargs, muon_signature, name, value):
+            unsupported_kwargs.append(name)
+    if unsupported_kwargs and _is_rank0():
+        _emit(
+            log_fn,
+            "Installed DMuon does not support optional config %s; "
+            "continuing without them.",
+            unsupported_kwargs,
+            level=logging.WARNING,
+        )
 
     optimizer = dmuon.Muon(
         model,

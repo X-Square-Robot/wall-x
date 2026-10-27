@@ -3,76 +3,39 @@ from pathlib import Path
 from setuptools import find_packages, setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-ROOT = Path(__file__).resolve().parent
-OPS_DIR = Path("wall_x") / "model" / "core" / "ops"
-CSRC_DIR = OPS_DIR / "csrc"
+CSRC = Path("wall_x") / "model" / "core" / "ops" / "csrc"
 
-PUBLIC_SCRIPTS = [
-    "scripts/compute_norm_stats.py",
-    "scripts/draw_openloop_plot.py",
-    "scripts/fake_inference.py",
-    "scripts/infer_libero.py",
-    "scripts/merge_sharded_weights.py",
-    "scripts/merge_tokenizer.py",
-    "scripts/run_libero.sh",
-    "scripts/run_serving.sh",
+# PyTorch extensions disable the CUDA half/bfloat16 operators by default; the
+# kernels use them, so re-enable them.
+_HALF_OPERATORS = [
+    "-U__CUDA_NO_HALF_OPERATORS__",
+    "-U__CUDA_NO_HALF_CONVERSIONS__",
+    "-U__CUDA_NO_HALF2_OPERATORS__",
+    "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
 ]
+FAST = ["-O3", "-DNDEBUG", "--use_fast_math", "-std=c++17", *_HALF_OPERATORS]
+# rope and pos_embed_interp must round exactly like PyTorch: no FMA contraction,
+# exact division/sqrt, denormals kept.
+EXACT = [*FAST, "--fmad=false", "-prec-div=true", "-prec-sqrt=true", "--ftz=false"]
 
 
-def read_readme() -> str:
-    readme = ROOT / "README.md"
-    return readme.read_text(encoding="utf-8") if readme.exists() else ""
-
-
-def build_ext_modules():
-    binding = CSRC_DIR / "binding.cu"
-    if not (ROOT / binding).exists():
-        raise RuntimeError(
-            "CUDA operator sources are missing. The OSS export must include "
-            "wall_x/model/core/ops/csrc/binding.cu."
-        )
-
-    cuda_sources = [binding] + sorted(
-        path for path in (ROOT / CSRC_DIR).rglob("*.cu") if path.name != "binding.cu"
+def extension(name, binding, nvcc_flags):
+    if not (CSRC / binding).exists():
+        raise RuntimeError(f"CUDA operator sources are missing: {CSRC / binding}")
+    return CUDAExtension(
+        name=f"wall_x.model.core.ops.{name}",
+        sources=[str(CSRC / binding)],
+        include_dirs=[str(CSRC.resolve()), str((CSRC / "common").resolve())],
+        extra_compile_args={"cxx": ["-O3", "-std=c++17"], "nvcc": nvcc_flags},
     )
-    cuda_sources = [
-        path if path == binding else path.relative_to(ROOT) for path in cuda_sources
-    ]
-
-    return [
-        CUDAExtension(
-            name="wall_x.model.core.ops._cuda_ext_bin",
-            sources=[str(path) for path in cuda_sources],
-            include_dirs=[str(CSRC_DIR), str(CSRC_DIR / "common")],
-            extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"],
-                "nvcc": ["-O3", "--use_fast_math", "-std=c++17"],
-            },
-        )
-    ]
 
 
 setup(
     name="wall_x",
-    version="1.1.0",
-    description="Training and inference code for WALL open-source embodied models.",
-    long_description=read_readme(),
-    long_description_content_type="text/markdown",
-    author="X-Square Robot",
-    url="https://github.com/X-Square-Robot/wall-x",
-    python_requires=">=3.10",
-    packages=find_packages(exclude=("tests", "tests.*")),
-    scripts=PUBLIC_SCRIPTS,
-    ext_modules=build_ext_modules(),
-    cmdclass={"build_ext": BuildExtension.with_options(use_ninja=True)},
-    classifiers=[
-        "Development Status :: 4 - Beta",
-        "Intended Audience :: Developers",
-        "Intended Audience :: Science/Research",
-        "License :: OSI Approved :: Apache Software License",
-        "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-        "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    packages=find_packages(),
+    ext_modules=[
+        extension("_cuda_ext_bin", "binding.cu", FAST),
+        extension("_cuda_ext_exact_bin", "binding_exact.cu", EXACT),
     ],
+    cmdclass={"build_ext": BuildExtension},
 )

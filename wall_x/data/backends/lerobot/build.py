@@ -40,12 +40,7 @@ def load_lerobot_normalizers(cfg: Any):
         )
 
     dataset_name = str(lerobot_config["repo_id"])
-    norm_stats = load_norm_stats(
-        norm_stats_path,
-        key_mappings,
-        dof_config=dict(cfg.task.dof_config or {}),
-        agent_pos_config=dict(cfg.task.agent_pos_config or {}),
-    )
+    norm_stats = load_norm_stats(norm_stats_path, key_mappings)
     normalizer_action, normalizer_propri = create_normalizers_from_lerobot_norm_stats(
         norm_stats,
         dataset_name,
@@ -105,8 +100,8 @@ class _LerobotDatasetWrapper:
         # train and val splits (flipped by ``_train()`` / ``_eval()``).
         # The val DataLoader's DistributedSampler caches total_size sized
         # to the val split but ``__iter__`` reads ``len(self.dataset)``
-        # live - if a preceding train_loop left the pointer at train, that
-        # live len is ~20x total_size and DistributedSampler asserts.
+        # live — if a preceding train_loop left the pointer at train, that
+        # live len is ~20× total_size and DistributedSampler asserts.
         # Rebuild each time so ``_eval()`` runs and a fresh sampler is
         # snapped to the current (val) split length. Mirrors the train-side
         # rebuild-on-every-epoch pattern.
@@ -155,7 +150,7 @@ def load_trainer_data_config_from_yaml_dict(yaml_dict: Dict[str, Any]) -> Lerobo
 
 
 def _build_flat_config(cfg: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Map typed TrainConfig -> (flat_config, lerobot_config) for legacy entry.
+    """Map typed TrainConfig → (flat_config, lerobot_config) for legacy entry.
 
     ``load_lerobot_data`` expects a 2509-style flat dict plus a separate
     ``lerobot_config`` carrying ``repo_id`` / ``root``. This function is
@@ -167,7 +162,6 @@ def _build_flat_config(cfg: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     data = cfg.data
     hp = cfg.hyperparams
     raw = getattr(cfg, "_raw_yaml", {}) or {}
-    raw_data = dict(getattr(cfg, "_raw_data", {}) or {})
 
     lerobot_cfg = dict(data.lerobot_config or {})
     if "repo_id" not in lerobot_cfg:
@@ -183,27 +177,17 @@ def _build_flat_config(cfg: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         "seed": hp.seed,
         "resolution": data.resolution,
     }
-    if raw_data.get("max_length") is not None:
-        data_section["max_length"] = raw_data["max_length"]
     if data.priority_order is not None:
         data_section["priority_order"] = data.priority_order
     if data.camera_name_mapping is not None:
         data_section["camera_name_mapping"] = data.camera_name_mapping
-    data_section.setdefault(
-        "use_state_string_representation",
-        cfg.task.use_state_string_representation,
-    )
-    data_section.setdefault(
-        "state_bins",
-        raw_data.get("state_bins", raw.get("state_bins", 256)),
-    )
 
     # Dof/agent_pos totals for the collator's zero-pad step. When resuming
-    # from a checkpoint trained on a larger action space, task.dof_config
-    # should include an ``action_padding`` key that absorbs the diff; the
-    # collator right-pads action/agent_pos tensors to these totals with
-    # dof_mask/agent_pos_mask zeroed on padded dims so loss doesn't flow
-    # through them.
+    # from a checkpoint trained on a larger action space (e.g. bus2602 26-dim
+    # dof while libero data is 7-dim), task.dof_config should include an
+    # ``action_padding`` key that absorbs the diff; the collator right-pads
+    # action/agent_pos tensors to these totals with dof_mask/agent_pos_mask
+    # zeroed on padded dims so loss doesn't flow through them.
     dof_total = int(sum((cfg.task.dof_config or {}).values()))
     agent_pos_total = int(sum((cfg.task.agent_pos_config or {}).values()))
 
@@ -222,15 +206,6 @@ def _build_flat_config(cfg: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         "noise_scheduler": data.noise_scheduler or {},
         "dof_total_dim": dof_total,
         "agent_pos_total_dim": agent_pos_total,
-        "dof_config": dict(cfg.task.dof_config or {}),
-        "agent_pos_config": dict(cfg.task.agent_pos_config or {}),
-        "use_state_string_representation": cfg.task.use_state_string_representation,
-        "state_bins": int(
-            raw_data.get("state_bins")
-            or data_section.get("state_bins")
-            or raw.get("state_bins")
-            or 256
-        ),
         "data": data_section,
     }
     return flat, lerobot_cfg
@@ -244,7 +219,7 @@ def load_lerobot_v2(
     The third return value ``train_num`` is a snapshot of
     ``len(train_dataloader)`` at construction time. It matches
     ``wrapper.global_train_iters.value`` initially but does not track
-    subsequent rebuilds inside ``set_epoch`` - callers doing dynamic
+    subsequent rebuilds inside ``set_epoch`` — callers doing dynamic
     resampling should read from the mp.Value, not from this snapshot.
     """
     from wall_x.data.backends.lerobot.loader import load_lerobot_data
@@ -269,7 +244,7 @@ def load_lerobot_v2(
 
     # PreprocessedDataset.get_*_dataloader returns (dataloader, sampler).
     # Build val first, train second, so the inner ``_dataset`` pointer is
-    # left at the train split when we finish - workers fork from that
+    # left at the train split when we finish — workers fork from that
     # state on first iteration.
     val_dataloader, _ = inner.get_val_dataloader()
     val_num = len(val_dataloader) if val_dataloader is not None else 0
@@ -308,7 +283,7 @@ def load_lerobot_v2(
 
 
 def build(cfg, ctx):
-    """Backend Protocol entry - returns a ``DataBundle``.
+    """Backend Protocol entry — returns a ``DataBundle``.
 
     Wraps ``load_lerobot_v2`` (which returns the trainer-facing triple)
     into the unified ``DataBundle`` shape every backend exposes.

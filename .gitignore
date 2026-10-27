@@ -33,10 +33,10 @@ ckpt/
 .DS_Store
 .vscode/
 
-# Machine-specific deploy overrides (use env.example)
-workspace/rtx5090/local/env.sh
-
 # Keep exported CUDA kernel sources and Python wrappers tracked:
 #   wall_x/model/core/ops/csrc/
 #   wall_x/model/core/ops/_cuda_ext.py
 #   wall_x/model/core/ops/_cuda_wrappers.py
+
+# Compiled CUDA operators
+*.so

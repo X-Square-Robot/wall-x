@@ -6,7 +6,6 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import numpy as np
 import torch
 from transformers import BatchFeature
 
@@ -20,63 +19,21 @@ class NormStats:
     delta: torch.Tensor
 
 
-def load_norm_stats(
-    norm_stats_path,
-    key_mappings,
-    dof_config: dict | None = None,
-    agent_pos_config: dict | None = None,
-):
-    from wall_x.data.backends.lerobot.rotation_layout import (
-        layout_uses_6d_rotation,
-        maybe_convert_norm_stats_vector,
-    )
-
+def load_norm_stats(norm_stats_path, key_mappings):
     with open(norm_stats_path, "r") as f:
         norm_stats = json.load(f)
     action_key = key_mappings["action"]
     state_key = key_mappings["state"]
-
-    action_q01 = maybe_convert_norm_stats_vector(
-        norm_stats["norm_stats"][action_key]["q01"], dof_config or {}
-    )
-    action_q99 = maybe_convert_norm_stats_vector(
-        norm_stats["norm_stats"][action_key]["q99"], dof_config or {}
-    )
-    if layout_uses_6d_rotation(dof_config or {}) and len(action_q01) != len(
-        norm_stats["norm_stats"][action_key]["q01"]
-    ):
-        logger.info(
-            "Converted action norm stats Euler->6D (%d -> %d dims)",
-            len(norm_stats["norm_stats"][action_key]["q01"]),
-            len(action_q01),
-        )
-
-    q01 = torch.tensor(action_q01)
-    q99 = torch.tensor(action_q99)
+    q01 = torch.tensor(norm_stats["norm_stats"][action_key]["q01"])
+    q99 = torch.tensor(norm_stats["norm_stats"][action_key]["q99"])
     delta = q99 - q01
     action_norm_stats = NormStats(
         min=q01,
         max=q99,
         delta=delta,
     )
-
-    state_q01 = maybe_convert_norm_stats_vector(
-        norm_stats["norm_stats"][state_key]["q01"], agent_pos_config or {}
-    )
-    state_q99 = maybe_convert_norm_stats_vector(
-        norm_stats["norm_stats"][state_key]["q99"], agent_pos_config or {}
-    )
-    if layout_uses_6d_rotation(agent_pos_config or {}) and len(state_q01) != len(
-        norm_stats["norm_stats"][state_key]["q01"]
-    ):
-        logger.info(
-            "Converted state norm stats Euler->6D (%d -> %d dims)",
-            len(norm_stats["norm_stats"][state_key]["q01"]),
-            len(state_q01),
-        )
-
-    q01 = torch.tensor(state_q01)
-    q99 = torch.tensor(state_q99)
+    q01 = torch.tensor(norm_stats["norm_stats"][state_key]["q01"])
+    q99 = torch.tensor(norm_stats["norm_stats"][state_key]["q99"])
     delta = q99 - q01
     state_norm_stats = NormStats(
         min=q01,
@@ -320,6 +277,8 @@ def get_wallx_normal_text(
     cam_mapping: Optional[Dict[str, str]] = None,
     generate_subtask_ratio: float = 0.0,
     camera_name_mapping: Optional[Dict[str, str]] = None,
+    system_prompt: Optional[str] = None,
+    instruction_label: str = "Instruction",
 ) -> Tuple[str, bool]:
     """Construct complete multimodal prompt text for Wall-X model.
 
@@ -338,6 +297,8 @@ def get_wallx_normal_text(
         cam_mapping: Camera name mapping dictionary
         generate_subtask_ratio: Probability of generating subtask instead of actions
         camera_name_mapping: Optional display-name mapping for prompt text
+        system_prompt: Optional system message; defaults to a generic assistant
+        instruction_label: Label before the task text (default "Instruction")
 
     Returns:
         Tuple of (formatted_prompt_text, is_subtask_generation)
@@ -353,9 +314,8 @@ def get_wallx_normal_text(
     action_fast_symbol = "<|action_fast|>"
 
     # System prologue
-    prologue = (
-        f"{role_start_symbol}system\nYou are a helpful assistant.{role_end_symbol}\n"
-    )
+    system_prompt = system_prompt or "You are a helpful assistant."
+    prologue = f"{role_start_symbol}system\n{system_prompt}{role_end_symbol}\n"
 
     # User request with observation
     user_request = f"{role_start_symbol}user\nObservation:"
@@ -364,7 +324,7 @@ def get_wallx_normal_text(
         for _, cam_name in cam_mapping.items():
             view_name = camera_name_mapping.get(cam_name, cam_name)
             user_request += f" {view_name}: {vision_start_symbol}{image_pad_symbol}{vision_end_symbol}"
-    user_request += "\nInstruction:"
+    user_request += f"\n{instruction_label}:"
 
     # Get frame-specific instruction
     frame_instruction_info, _ = get_frame_instruction(
@@ -463,10 +423,6 @@ def preprocesser_call(
     truncation: Optional[bool] = None,
     max_length: Optional[int] = None,
     return_tensors: str = "pt",
-    norm_state=None,
-    agent_pos_mask=None,
-    state_bins: int = 256,
-    state_drop_prob: float = 0.0,
 ) -> BatchFeature:
     """Unified preprocessing function for Wall-X model handling text, image and video inputs.
 
@@ -523,7 +479,7 @@ def preprocesser_call(
             )
         else:
             raise RuntimeError(
-                "processor has no video_processor attribute - this code path "
+                "processor has no video_processor attribute — this code path "
                 "requires transformers>=5.2. Upgrade transformers or pass "
                 "videos=None."
             )
@@ -535,34 +491,6 @@ def preprocesser_call(
     # Ensure text input is in list format
     if not isinstance(text, list):
         text = [text]
-
-    # Discretize normalized proprioception into the <|propri|> prompt slot.
-    if norm_state is not None:
-        norm_state = (
-            norm_state.cpu().numpy()
-            if isinstance(norm_state, torch.Tensor)
-            else norm_state
-        )
-        discretized = (
-            np.digitize(norm_state, bins=np.linspace(-1, 1, state_bins + 1)[:-1]) - 1
-        )
-        discretized = discretized[:, 0, :]
-        if agent_pos_mask is not None:
-            mask = (
-                agent_pos_mask[:, 0, :].cpu().numpy().astype(bool)
-                if isinstance(agent_pos_mask, torch.Tensor)
-                else agent_pos_mask[:, 0, :].astype(bool)
-            )
-        else:
-            mask = np.ones(discretized.shape, dtype=bool)
-        for i in range(len(text)):
-            if "<|propri|>" not in text[i]:
-                continue
-            if state_drop_prob > 0 and random.random() < state_drop_prob:
-                text[i] = text[i].replace("<|propri|>", "")
-            else:
-                state_str = " ".join(map(str, discretized[i, mask[i]]))
-                text[i] = text[i].replace("<|propri|>", state_str)
 
     # Process image placeholder tokens in text
     if image_grid_thw is not None:

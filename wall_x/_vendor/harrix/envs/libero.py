@@ -9,18 +9,13 @@ The chunk-level API mirrors standard LIBERO rollout semantics:
 from __future__ import annotations
 
 import gc
-import logging
 import os
+import time
 from typing import Optional
 
 import numpy as np
 
 from wall_x._vendor.harrix.envs.base import BaseEnv
-from wall_x._vendor.harrix.envs.libero_common import (
-    get_rollout_frame,
-    model_action_to_libero_env,
-    save_rollout_video,
-)
 from wall_x._vendor.harrix.envs.libero_sim import (
     create_libero_engine,
     find_image_observables,
@@ -34,8 +29,6 @@ from wall_x._vendor.harrix.envs.libero_sim import (
 )
 from wall_x._vendor.harrix.envs.registry import register_env
 from wall_x._vendor.harrix.eval_config import EvalConfig
-
-logger = logging.getLogger(__name__)
 
 
 @register_env("libero")
@@ -77,31 +70,12 @@ class LiberoEnv(BaseEnv):
         if self._bit_dump_dir:
             os.makedirs(self._bit_dump_dir, exist_ok=True)
 
-        rollout_dir = (self._libero_cfg.rollout_dir or "").strip()
-        if not rollout_dir:
-            rollout_dir = os.environ.get("WALLX_ROLLOUT_DIR", "").strip()
-        if rollout_dir and os.environ.get("WALLX_DISABLE_ROLLOUT", "0") == "1":
-            rollout_dir = ""
-        self._rollout_dir = rollout_dir or None
-        self._rollout_fps = int(self._libero_cfg.rollout_fps)
-        if self._rollout_dir:
-            worker_subdir = f"worker{worker_id}" if cfg.runtime.num_workers > 1 else ""
-            self._rollout_dir = os.path.join(
-                self._rollout_dir,
-                self._task_suite_name,
-                worker_subdir,
-            )
-            os.makedirs(self._rollout_dir, exist_ok=True)
-            logger.info("Rollout MP4 saving enabled: %s", self._rollout_dir)
-
         # Per-episode state consumed by execute_chunk.
         self._current_ep: Optional[tuple] = None
         self._current_task_desc: str = ""
         self._current_instruction: str = ""
         self._chunk_counter_in_ep: int = 0
         self._last_obs_for_dump: Optional[dict] = None
-        self._replay_images: list[np.ndarray] = []
-        self._rollout_saved = False
 
     # ---- BaseEnv API ----
 
@@ -122,6 +96,16 @@ class LiberoEnv(BaseEnv):
                 eps.append((suite, tid, epi))
         return eps
 
+    @classmethod
+    def encode_observation(cls, raw_obs: dict) -> dict:
+        from wall_x._vendor.harrix.envs.libero_common import encode_raw_obs
+
+        return encode_raw_obs(raw_obs)
+
+    @classmethod
+    def max_infer_rounds(cls, cfg: EvalConfig) -> int:
+        return cfg.env.libero.max_infer_times
+
     @property
     def robot_spec(self) -> dict:
         """Return robot spec for driver/adapter validation."""
@@ -129,12 +113,12 @@ class LiberoEnv(BaseEnv):
             load_train_config_with_ckpt_overlay,
         )
 
-        train_cfg = load_train_config_with_ckpt_overlay(
+        typed_cfg, _ = load_train_config_with_ckpt_overlay(
             self._cfg.model.train_config_path,
             self._cfg.model.checkpoint_path,
         )
         return {
-            "dof_layout": train_cfg.get("dof_config", {}),
+            "dof_layout": typed_cfg.task.dof_config,
             "cam_names": list(self._cfg.model.cam_names),
             "norm_key": self._cfg.model.norm_key,
         }
@@ -149,7 +133,9 @@ class LiberoEnv(BaseEnv):
                 f"env bound to suite={self._task_suite_name}, got ep with suite={suite}"
             )
 
-        need_rebuild = self._rebuild_env_per_episode or self._current_task_id != task_id
+        need_rebuild = (
+            self._rebuild_env_per_episode or self._current_task_id != task_id
+        )
         if need_rebuild:
             self._rebuild_env(task_id)
 
@@ -180,7 +166,6 @@ class LiberoEnv(BaseEnv):
         self._current_instruction = get_instruction(task_desc)
         self._chunk_counter_in_ep = 0
         self._last_obs_for_dump = obs
-        self._begin_rollout_capture(obs)
 
         return {
             "obs": obs,
@@ -201,9 +186,8 @@ class LiberoEnv(BaseEnv):
             )
         self._chunk_counter_in_ep += 1
 
-        skip_render = self._chunk_skip_render()
         # Disable rendering at the chunk start when render-skip is enabled.
-        if skip_render and self._image_obs:
+        if self._effective_skip_render and self._image_obs:
             if self._render_enabled_state:
                 set_render_enabled(self._image_obs, False)
                 self._render_enabled_state = False
@@ -214,7 +198,7 @@ class LiberoEnv(BaseEnv):
         for step_idx in range(H):
             # Re-enable rendering before the final step to return a fresh image.
             if (
-                skip_render
+                self._effective_skip_render
                 and self._image_obs
                 and step_idx == H - 1
                 and not self._render_enabled_state
@@ -222,25 +206,25 @@ class LiberoEnv(BaseEnv):
                 set_render_enabled(self._image_obs, True)
                 self._render_enabled_state = True
 
-            action = model_action_to_libero_env(actions[step_idx].reshape(-1))
+            action = actions[step_idx].reshape(-1)
             obs, _, done_flag, _ = self._libero_env.step(action)
             last_obs = obs
             steps += 1
-            self._append_rollout_frame(obs)
             if bool(done_flag):
                 done = True
                 # Do not add an extra simulator step on early success; just make
                 # sure future rendering is enabled.
-                if skip_render and self._image_obs and not self._render_enabled_state:
+                if (
+                    self._effective_skip_render
+                    and self._image_obs
+                    and not self._render_enabled_state
+                ):
                     set_render_enabled(self._image_obs, True)
                     self._render_enabled_state = True
                 break
 
         self._last_obs_for_dump = last_obs
         return {"obs": last_obs, "done": done, "steps": steps}
-
-    def finalize_episode(self, success: bool) -> None:
-        self._save_episode_rollout(success)
 
     def shutdown(self) -> None:
         if self._libero_env is not None:
@@ -250,54 +234,92 @@ class LiberoEnv(BaseEnv):
                 pass
             self._libero_env = None
 
+    # ---- episode-level rollout override ----
+
+    def run_episode(self, ep_id, predict):
+        """Run a LIBERO episode with client-side action buffering."""
+        from collections import deque
+
+        from wall_x._vendor.harrix.envs.libero_common import encode_raw_obs
+
+        suite, task_id, ep_idx = ep_id
+        if suite != self._task_suite_name:
+            raise ValueError(
+                f"env bound to suite={self._task_suite_name}, got ep with suite={suite}"
+            )
+
+        need_rebuild = (
+            self._rebuild_env_per_episode or self._current_task_id != task_id
+        )
+        if need_rebuild:
+            self._rebuild_env(task_id)
+
+        task_desc, default_states = resolve_task_info(self._task_suite, task_id)
+        init_state = pick_initial_state(
+            self._libero_cfg.initial_states_path,
+            self._custom_initial_states,
+            task_desc,
+            default_states,
+            ep_idx,
+        )
+
+        t_ep_start = time.time()
+        if not need_rebuild:
+            self._libero_env.reset()
+        obs = self._libero_env.set_init_state(init_state)
+        if obs is None:
+            raise RuntimeError("set_init_state returned None")
+
+        set_render_enabled(self._image_obs, True)
+        render_enabled_state = True
+
+        dummy_action = get_libero_dummy_action()
+        for _ in range(10):
+            obs, _, _, _ = self._libero_env.step(dummy_action)
+
+        chunk_buffer: deque = deque()
+        instruction = get_instruction(task_desc)
+        max_steps = (
+            self._libero_cfg.max_infer_times * self._cfg.model.action_horizon
+        )
+        success = False
+        step_count = 0
+        chunk_counter_in_ep = 0
+        for step in range(max_steps):
+            if not chunk_buffer:
+                encoded = encode_raw_obs(obs)
+                chunk = predict(encoded, instruction, step)
+                if self._bit_dump_dir:
+                    self._dump_chunk_npz(ep_id, chunk_counter_in_ep, obs, chunk)
+                chunk_counter_in_ep += 1
+                for a in chunk:
+                    chunk_buffer.append(np.asarray(a, dtype=np.float32))
+
+            action = chunk_buffer.popleft().reshape(-1)
+
+            if self._effective_skip_render and self._image_obs:
+                next_needs_forward = len(chunk_buffer) == 0
+                if (not self._chunk_granular_render_toggle) or (
+                    next_needs_forward != render_enabled_state
+                ):
+                    set_render_enabled(self._image_obs, next_needs_forward)
+                    render_enabled_state = next_needs_forward
+
+            obs, _, done, _ = self._libero_env.step(action)
+            step_count = step + 1
+            if bool(done):
+                success = True
+                break
+
+        elapsed = time.time() - t_ep_start
+        return {
+            "success": bool(success),
+            "steps": step_count,
+            "elapsed_sec": round(elapsed, 3),
+            "task_desc": task_desc,
+        }
+
     # ---- internals ----
-
-    def _chunk_skip_render(self) -> bool:
-        """Skip intermediate renders unless rollout MP4 saving needs every frame."""
-        return self._effective_skip_render and self._rollout_dir is None
-
-    def _begin_rollout_capture(self, obs: dict | None) -> None:
-        self._replay_images = []
-        self._rollout_saved = False
-        if self._rollout_dir and obs is not None:
-            if self._image_obs and not self._render_enabled_state:
-                set_render_enabled(self._image_obs, True)
-                self._render_enabled_state = True
-            self._replay_images.append(get_rollout_frame(obs))
-
-    def _append_rollout_frame(self, obs: dict | None) -> None:
-        if self._rollout_dir and obs is not None:
-            self._replay_images.append(get_rollout_frame(obs))
-
-    def _save_episode_rollout(self, success: bool) -> None:
-        if (
-            not self._rollout_dir
-            or self._rollout_saved
-            or not self._replay_images
-            or self._current_ep is None
-        ):
-            return
-        task_id, ep_idx = self._current_ep
-        try:
-            mp4_path = save_rollout_video(
-                self._rollout_dir,
-                self._replay_images,
-                task_id=task_id,
-                episode_idx=ep_idx,
-                success=success,
-                task_description=self._current_task_desc,
-                fps=self._rollout_fps,
-            )
-            self._rollout_saved = True
-            if mp4_path:
-                logger.info("Saved rollout MP4: %s", mp4_path)
-        except Exception as exc:
-            logger.warning(
-                "Failed to save rollout MP4 for task%d ep%d: %s",
-                task_id,
-                ep_idx,
-                exc,
-            )
 
     def _rebuild_env(self, task_id: int) -> None:
         if self._libero_env is not None:

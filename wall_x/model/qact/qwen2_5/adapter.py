@@ -1,4 +1,4 @@
-"""Qwen2.5 VLA adapter - variant-specific overrides on top of VLAdapter."""
+"""Qwen2.5 VLA adapter — variant-specific overrides on top of VLAdapter."""
 
 from wall_x.model.registry import register_model
 from wall_x.trainer.adapters.vla_model_adapter import VLAdapter
@@ -22,6 +22,7 @@ class Qwen2_5Adapter(VLAdapter):
 
     @classmethod
     def inference_model_class(cls):
+        """Return the model class to use for inference."""
         return cls.model_class()
 
     def get_transformer_layer_cls(self):

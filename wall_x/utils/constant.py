@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+
 ACTION_KEY_FULL_MAPPING: dict[str, str] = {}
 _ACTION_KEY_FULL_MAPPING = ACTION_KEY_FULL_MAPPING
 

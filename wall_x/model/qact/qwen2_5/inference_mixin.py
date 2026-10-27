@@ -1,8 +1,8 @@
 import logging
-from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
+from typing import Optional, List, Tuple
 from torchdiffeq import odeint
 
 logger = logging.getLogger(__name__)
@@ -291,17 +291,12 @@ class VLAInferenceMixin:
         flow_action_mask = input_ids == self.action_token_id_set["action_token_id"]
         inputs_embeds[flow_action_mask] = action_embed
 
-        # Compute the token span for each expert group after permutation.
-        group_size = torch.zeros(
-            self.config.num_experts, dtype=torch.long, device="cpu"
+        two_expert_layout = self._prepare_two_expert_layout_for_model(
+            moe_token_types,
+            inputs_embeds,
+            action_starts=kwargs.get("action_starts"),
+            action_ends=kwargs.get("action_ends"),
         )
-        for i in range(self.config.num_experts):
-            group_size[i] = (moe_token_types == i).sum()
-
-        # Calculate start and end indices for each expert group
-        start_indices = torch.cumsum(group_size, dim=0) - group_size
-        end_indices = torch.cumsum(group_size, dim=0)
-
         prefetch_output = self.model(
             input_ids=None,
             attention_mask=attention_mask,
@@ -315,8 +310,7 @@ class VLAInferenceMixin:
             output_hidden_states=False,
             return_dict=True,
             adarms_conds=[None, adarms_cond],
-            start_indices=start_indices,
-            end_indices=end_indices,
+            two_expert_layout=two_expert_layout,
         )
 
         hidden_states = prefetch_output.last_hidden_state
@@ -335,8 +329,6 @@ class VLAInferenceMixin:
         ][
             0
         ]  # Attention, not tested yet with batch
-        start_indices[1] -= ar_prefix_length.item()
-        end_indices -= ar_prefix_length.item()
         if hasattr(prefix_kv_cache, "key_cache"):
             for layer_i in range(len(prefix_kv_cache.key_cache)):
                 prefix_kv_cache.key_cache[layer_i] = prefix_kv_cache.key_cache[layer_i][
@@ -359,6 +351,9 @@ class VLAInferenceMixin:
         ar_postfix_attention_mask = attention_mask[:, ar_prefix_length:]
         ar_postfix_moe_token_types = moe_token_types[:, ar_prefix_length:]
         ar_postfix_input_ids = input_ids[:, ar_prefix_length:]
+        ar_postfix_two_expert_layout = self._prepare_two_expert_layout_for_model(
+            ar_postfix_moe_token_types, ar_postfix_inputs_embeds
+        )
 
         noisy_steps_per_sample = (
             torch.ceil((1.0 - times[0] - dt) * (total_ar_step + 1)).long() - 1
@@ -462,8 +457,7 @@ class VLAInferenceMixin:
                 output_hidden_states=False,
                 return_dict=True,
                 adarms_conds=[None, adarms_cond],
-                start_indices=start_indices,
-                end_indices=end_indices,
+                two_expert_layout=ar_postfix_two_expert_layout,
             )
 
             hidden_states = transformer_outputs.last_hidden_state
@@ -561,15 +555,17 @@ class VLAInferenceMixin:
                 output["predict_action"] = predict_action
 
         else:
-            predict_action = action_trajectory[-1]
+            predict_action_norm = action_trajectory[-1]
+            output["predict_action_norm"] = predict_action_norm
             predict_action = (
                 self.action_preprocessor.normalizer_action.unnormalize_data(
-                    predict_action, dataset_names
+                    predict_action_norm, dataset_names
                 )
             )
             output["predict_action"] = predict_action
 
         if action_chunk is not None:
+            output["gt_action_norm"] = action_chunk
             output["gt_action"] = (
                 self.action_preprocessor.normalizer_action.unnormalize_data(
                     action_chunk, dataset_names
@@ -790,6 +786,7 @@ class VLAInferenceMixin:
         input_ids,
         action_horizon,
         action_dim,
+        init_noise: Optional[torch.Tensor] = None,
         num_inference_timesteps: int = 10,
         prefix_length: Optional[int] = None,  # Prefix length.
         attention_mask: Optional[torch.Tensor] = None,
@@ -797,8 +794,6 @@ class VLAInferenceMixin:
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         moe_token_types: Optional[torch.LongTensor] = None,
-        start_indices: Optional[torch.Tensor] = None,
-        end_indices: Optional[torch.Tensor] = None,
         positional_masks: Optional[torch.LongTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
@@ -824,9 +819,10 @@ class VLAInferenceMixin:
         batch_size = (
             input_ids.shape[0] if input_ids is not None else inputs_embeds.shape[0]
         )
-        assert (
-            batch_size == 1
-        ), "generate_flow_action_no_cache only support batch size 1"
+        # batch_size > 1 is supported for batched eval where every sample in the
+        # batch shares an identical prompt prefix (e.g. frames from one episode):
+        # the body below is batch-safe (noise/noisy_action use batch_size,
+        # masked-scatter spans the whole batch, prefix_length is unused).
 
         output_attentions = (
             output_attentions
@@ -938,28 +934,23 @@ class VLAInferenceMixin:
                 position_ids = position_ids.add(delta)
                 position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
-        if start_indices is None or end_indices is None:
-            # Compute the token span for each expert group after permutation.
-            group_size = torch.zeros(
-                self.config.num_experts, dtype=torch.long, device="cpu"
-            )
-            for i in range(self.config.num_experts):
-                group_size[i] = (moe_token_types == i).sum()
-
-            # Calculate start and end indices for each expert group
-            start_indices = torch.cumsum(group_size, dim=0) - group_size
-            end_indices = torch.cumsum(group_size, dim=0)
-
         if action_chunk is not None:
             action_chunk = action_chunk.to(inputs_embeds.device).to(torch.float32)
 
         output = {}
 
-        noise = torch.randn(
-            size=(batch_size, action_horizon, action_dim),
-            dtype=torch.float32,
-            device=inputs_embeds.device,
-        )
+        if init_noise is not None:
+            noise = init_noise.to(device=inputs_embeds.device, dtype=torch.float32)
+            assert noise.shape == (batch_size, action_horizon, action_dim), (
+                f"init_noise shape {tuple(noise.shape)} != "
+                f"{(batch_size, action_horizon, action_dim)}"
+            )
+        else:
+            noise = torch.randn(
+                size=(batch_size, action_horizon, action_dim),
+                dtype=torch.float32,
+                device=inputs_embeds.device,
+            )
         noisy_action = noise.clone()
         dof_mask = dof_mask.to(inputs_embeds.device).to(torch.float32)
 
@@ -967,6 +958,12 @@ class VLAInferenceMixin:
             num_inference_timesteps, inputs_embeds.device, torch.float32
         )
         flow_action_mask = input_ids == self.action_token_id_set["action_token_id"]
+        two_expert_layout = self._prepare_two_expert_layout_for_model(
+            moe_token_types,
+            inputs_embeds,
+            action_starts=kwargs.get("action_starts"),
+            action_ends=kwargs.get("action_ends"),
+        )
 
         if not dof_mask.all():
             padding_action = (
@@ -996,14 +993,13 @@ class VLAInferenceMixin:
                 past_key_values=None,
                 inputs_embeds=inputs_embeds,
                 moe_token_types=moe_token_types,
-                start_indices=start_indices,
-                end_indices=end_indices,
                 positional_masks=positional_masks,
                 use_cache=True,
                 output_attentions=False,
                 output_hidden_states=False,
                 return_dict=True,
                 adarms_conds=[None, adarms_cond],
+                two_expert_layout=two_expert_layout,
             )
 
             hidden_states = model_output.last_hidden_state
@@ -1011,8 +1007,14 @@ class VLAInferenceMixin:
             action_pred = self.action_preprocessor.action_proj_back(
                 action_hidden_states[:, : self.action_preprocessor.action_hidden_size]
             )
+            # The masked gather flattens action tokens to (B*H, D); restore the
+            # (B, H, D) layout so the batched blends below broadcast correctly
+            # for batch_size > 1 (bs==1 is numerically unchanged).
+            action_pred = action_pred.reshape(batch_size, action_horizon, action_dim)
             if getattr(self.config, "use_x_pred", False):
-                v_t = (action_pred - noisy_action) / torch.clamp(1 - timestep, min=0.05)
+                v_t = (action_pred - noisy_action) / torch.clamp(
+                    1 - timestep.view(batch_size, 1, 1), min=0.05
+                )
             else:
                 v_t = action_pred
 
@@ -1023,9 +1025,12 @@ class VLAInferenceMixin:
 
         action_trajectory = odeint(step, noisy_action, times, method="euler")
 
-        predict_action = action_trajectory[-1]
+        predict_action_norm = action_trajectory[-1]
+        output["predict_action_norm"] = predict_action_norm
+        if action_chunk is not None:
+            output["gt_action_norm"] = action_chunk
         predict_action = self.action_preprocessor.normalizer_action.unnormalize_data(
-            predict_action, dataset_names
+            predict_action_norm, dataset_names
         )
         output["predict_action"] = predict_action
         # normalize action chunk to get gt_action

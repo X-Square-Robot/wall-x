@@ -5,11 +5,14 @@ from importlib import import_module
 from wall_x.trainer.adapters.base_adapter import ModelAdapter
 from wall_x.trainer.adapters.vla_model_adapter import VLAdapter
 
+
 _ADAPTER_SPECS = {
     "qwen2_5": ("wall_x.model.qact.qwen2_5.adapter", "Qwen2_5Adapter"),
+    "qwen3_5": ("wall_x.model.qact.qwen3_5.adapter", "Qwen3_5Adapter"),
 }
 _ADAPTER_CLASS_EXPORTS = {
     "Qwen2_5Adapter": "qwen2_5",
+    "Qwen3_5Adapter": "qwen3_5",
 }
 ADAPTER_IMPORT_ERRORS: dict[str, str] = {}
 _ADAPTER_LOADING: set[str] = set()
@@ -100,14 +103,6 @@ def format_adapter_error(model_type: str) -> str:
     return msg
 
 
-def resolve_adapter(model_type: str) -> type[ModelAdapter]:
-    """Return a registered adapter class, loading lazily when needed."""
-    adapter_cls = ADAPTER_REGISTRY.get(model_type)
-    if adapter_cls is None:
-        raise ValueError(format_adapter_error(model_type))
-    return adapter_cls
-
-
 def __getattr__(name: str):
     model_type = _ADAPTER_CLASS_EXPORTS.get(name)
     if model_type is not None:
@@ -121,8 +116,8 @@ __all__ = [
     "ModelAdapter",
     "VLAdapter",
     "Qwen2_5Adapter",
+    "Qwen3_5Adapter",
     "ADAPTER_REGISTRY",
     "ADAPTER_IMPORT_ERRORS",
     "format_adapter_error",
-    "resolve_adapter",
 ]

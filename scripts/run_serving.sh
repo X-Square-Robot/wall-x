@@ -22,8 +22,6 @@ Common options:
   --serialize-actions            Return robot-serialized actions.
   --no-serialize-actions         Return raw model action chunks. Default.
   --max-batch-size N             Enable dynamic batching.
-  --enable-cuda-graph            Enable CUDA graph in the serving runtime.
-  --enable-experimental-engine   Enable the experimental inference engine.
   --debug                        Enable debug logging.
   --dry-run                      Print the command without running it.
 
@@ -59,8 +57,6 @@ MODEL_DEVICE="${MODEL_DEVICE:-cuda}"
 MAX_BATCH_SIZE="${MAX_BATCH_SIZE:-}"
 DEFAULT_PROMPT="${DEFAULT_PROMPT:-}"
 SERIALIZE_ACTIONS="${SERIALIZE_ACTIONS:-0}"
-ENABLE_CUDA_GRAPH="${ENABLE_CUDA_GRAPH:-0}"
-ENABLE_EXPERIMENTAL_ENGINE="${ENABLE_EXPERIMENTAL_ENGINE:-0}"
 DEBUG="${DEBUG:-0}"
 DRY_RUN=0
 EXTRA_ARGS=()
@@ -191,14 +187,6 @@ while [[ $# -gt 0 ]]; do
             SERIALIZE_ACTIONS=0
             shift
             ;;
-        --enable-cuda-graph)
-            ENABLE_CUDA_GRAPH=1
-            shift
-            ;;
-        --enable-experimental-engine)
-            ENABLE_EXPERIMENTAL_ENGINE=1
-            shift
-            ;;
         --debug)
             DEBUG=1
             shift
@@ -247,12 +235,6 @@ if [[ -n "${MAX_BATCH_SIZE}" ]]; then
 fi
 if [[ -n "${DEFAULT_PROMPT}" ]]; then
     CMD+=(--default-prompt "${DEFAULT_PROMPT}")
-fi
-if [[ "${ENABLE_CUDA_GRAPH}" == "1" ]]; then
-    CMD+=(--enable-cuda-graph)
-fi
-if [[ "${ENABLE_EXPERIMENTAL_ENGINE}" == "1" ]]; then
-    CMD+=(--enable-experimental-engine)
 fi
 if [[ "${DEBUG}" == "1" ]]; then
     CMD+=(--debug)

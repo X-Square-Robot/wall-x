@@ -1,9 +1,3 @@
-// Re-enable CUDA half operators (PyTorch disables them)
-#undef __CUDA_NO_HALF_OPERATORS__
-#undef __CUDA_NO_HALF_CONVERSIONS__
-#undef __CUDA_NO_HALF2_OPERATORS__
-#undef __CUDA_NO_BFLOAT16_CONVERSIONS__
-
 #pragma once
 
 #include <cstdio>

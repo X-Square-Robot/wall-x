@@ -16,6 +16,7 @@ from wall_x.model.qact.qwen2_5.modeling_qwen2_5_vl import (
     Qwen2RMSNorm,
     Qwen2_5_VLPatchMerger,
     Qwen2_5_VLVisionBlock,
+    Qwen2_5_VisionPatchEmbed,
     Qwen2_5_VisionTransformerPretrainedModel,
 )
 
@@ -49,7 +50,12 @@ from wall_x.model.core.action.normalizer import (
     normalize_data_with_virtual_tail,
     unnormalize_data_with_virtual_tail,
 )
-from wall_x.model.core.action.moe import TokenTypeRouter, SparseMoeBlock
+from wall_x.model.core.action.moe import (
+    TokenTypeRouter,
+    SparseMoeBlock,
+)
+from wall_x.model.core.action.layout import TwoExpertLayout, prepare_two_expert_layout
+from wall_x.utils.checkpoint import maybe_checkpoint
 from wall_x.model.core.attention.selector import (
     ATTENTION_TYPES_WITH_2D_MASK,
     ATTENTION_TYPES_WITH_FLASH_MASK,
@@ -57,7 +63,7 @@ from wall_x.model.core.attention.selector import (
 from wall_x.model.core.attention.joint import JOINT_QWEN_ATTENTION_CLASSES
 from wall_x.model.qact.qwen2_5.inference_mixin import VLAInferenceMixin
 
-from wall_x.model.core.ops import unpermute, permute, get_rope_index
+from wall_x.model.core.ops import get_rope_index, two_expert_pack, two_expert_unpack
 
 logger = logging.get_logger(__name__)
 
@@ -68,12 +74,97 @@ _QWEN25_DMUON_BLOCKED_NAME_PARTS = (
     "norm",
 )
 
+_QWEN25_DMUON_SHARDED_ADAMW_NAME_PARTS = (
+    "embed_tokens",
+    "lm_head",
+)
+
 
 def _is_qwen25_dmuon_target_param(name: str, param: nn.Parameter) -> bool:
     """Select trainable Qwen2.5 VLA matrices for DMuon."""
     if not param.requires_grad or param.ndim != 2 or not name.endswith(".weight"):
         return False
     return not any(part in name for part in _QWEN25_DMUON_BLOCKED_NAME_PARTS)
+
+
+def _is_qwen25_dmuon_sharded_adamw_param(name: str, param: nn.Parameter) -> bool:
+    if not param.requires_grad or param.ndim != 2 or not name.endswith(".weight"):
+        return False
+    return any(part in name for part in _QWEN25_DMUON_SHARDED_ADAMW_NAME_PARTS)
+
+
+def _is_qwen25_dmuon_managed_param(name: str, param: nn.Parameter) -> bool:
+    return _is_qwen25_dmuon_target_param(
+        name, param
+    ) or _is_qwen25_dmuon_sharded_adamw_param(name, param)
+
+
+def _qwen25_dmuon_route_hint(name: str, param: nn.Parameter) -> Optional[str]:
+    if _is_qwen25_dmuon_sharded_adamw_param(name, param):
+        return "sharded_adamw"
+    if _is_qwen25_dmuon_target_param(name, param):
+        return "muon"
+    return None
+
+
+def _is_qwen25_dmuon_trainable_param(name: str, param: nn.Parameter) -> bool:
+    del name
+    return bool(param.requires_grad)
+
+
+def _qwen25_pure_dmuon_route_hint(name: str, param: nn.Parameter) -> Optional[str]:
+    if not param.requires_grad:
+        return None
+    if _is_qwen25_dmuon_target_param(name, param):
+        return "muon"
+    if _is_qwen25_dmuon_sharded_adamw_param(name, param):
+        return "sharded_adamw"
+    return "adamw"
+
+
+def _format_qwen25_route_examples(examples: dict[str, list[str]]) -> str:
+    return ", ".join(
+        f"{route}={names}" for route, names in sorted(examples.items()) if names
+    )
+
+
+def _validate_qwen25_pure_dmuon_route_plan(
+    named_parameters,
+) -> tuple[dict[str, int], dict[str, list[str]]]:
+    route_counts: dict[str, int] = {}
+    route_examples: dict[str, list[str]] = {
+        "muon": [],
+        "adamw": [],
+        "sharded_adamw": [],
+    }
+    bad_routes: list[tuple[str, str]] = []
+
+    for name, param in named_parameters:
+        if not param.requires_grad:
+            continue
+        route = _qwen25_pure_dmuon_route_hint(name, param)
+        route_key = str(route)
+        route_counts[route_key] = route_counts.get(route_key, 0) + 1
+        route_examples.setdefault(route_key, [])
+        if len(route_examples[route_key]) < 8:
+            route_examples[route_key].append(name)
+
+        if route == "sharded_adamw" and not _is_qwen25_dmuon_sharded_adamw_param(
+            name, param
+        ):
+            bad_routes.append((name, "unexpected sharded_adamw"))
+        if route == "muon" and not _is_qwen25_dmuon_target_param(name, param):
+            bad_routes.append((name, "unexpected muon"))
+        if route == "adamw" and (
+            _is_qwen25_dmuon_target_param(name, param)
+            or _is_qwen25_dmuon_sharded_adamw_param(name, param)
+        ):
+            bad_routes.append((name, "unexpected adamw"))
+
+    if bad_routes:
+        preview = bad_routes[:16]
+        raise RuntimeError(f"Invalid Qwen2.5 Pure DMuon route plan: {preview}")
+    return route_counts, route_examples
 
 
 @dataclass
@@ -184,11 +275,11 @@ class Qwen2_5_VLDecoderLayer_with_MoE(nn.Module, ActionModelMixMin):
         ] = None,  # necessary, but kept here for BC
         # for vla
         token_types: Optional[torch.LongTensor] = None,
-        start_indices: Optional[torch.Tensor] = None,
-        end_indices: Optional[torch.Tensor] = None,
-        probs: Optional[torch.Tensor] = None,
-        row_id_map: Optional[torch.Tensor] = None,
         orig_shape: Optional[Tuple[int, int, int]] = None,
+        action_starts: Optional[torch.Tensor] = None,
+        action_ends: Optional[torch.Tensor] = None,
+        expert_segments: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None,
+        two_expert_layout: Optional[TwoExpertLayout] = None,
         adarms_conds: Optional[List[torch.Tensor]] = [None, None],
         **kwargs,
     ) -> Tuple[
@@ -209,8 +300,7 @@ class Qwen2_5_VLDecoderLayer_with_MoE(nn.Module, ActionModelMixMin):
             cache_position (`torch.LongTensor` of shape `(sequence_length)`, *optional*):
                 Indices depicting the position of the input sequence tokens in the sequence.
             position_embeddings (`Tuple[torch.FloatTensor, torch.FloatTensor]`, *optional*):
-                Tuple containing the cosine and sine positional embeddings of shape `(batch_size, seq_len, head_dim)`,
-                with `head_dim` being the embedding dimension of each attention head.
+                Tuple containing cosine and sine positional embeddings of shape `(3, batch_size, seq_len, head_dim // 2)`.
             kwargs (`dict`, *optional*):
                 Arbitrary kwargs to be ignored, used for FSDP and other methods that injects code
                 into the model
@@ -223,9 +313,11 @@ class Qwen2_5_VLDecoderLayer_with_MoE(nn.Module, ActionModelMixMin):
             adarms_conds,
             self.input_layernorms,
             self.input_layernorm,
-            start_indices,
-            end_indices,
-            self.use_selective_recompute,
+            action_starts=action_starts,
+            action_ends=action_ends,
+            expert_segments=expert_segments,
+            two_expert_layout=two_expert_layout,
+            use_selective_recompute=self.use_selective_recompute,
         )
 
         # Self Attention
@@ -239,11 +331,11 @@ class Qwen2_5_VLDecoderLayer_with_MoE(nn.Module, ActionModelMixMin):
                 use_cache=use_cache,
                 cache_position=cache_position,
                 token_types=token_types,
-                start_indices=start_indices,
-                end_indices=end_indices,
-                probs=probs,
-                row_id_map=row_id_map,
                 orig_shape=orig_shape,
+                action_starts=action_starts,
+                action_ends=action_ends,
+                expert_segments=expert_segments,
+                two_expert_layout=two_expert_layout,
                 position_embeddings=position_embeddings,
             )
         else:
@@ -259,7 +351,14 @@ class Qwen2_5_VLDecoderLayer_with_MoE(nn.Module, ActionModelMixMin):
             )
 
         hidden_states = self._gated_residual(
-            residual, hidden_states, gate, start_indices, end_indices
+            residual,
+            hidden_states,
+            gate,
+            token_types=token_types,
+            action_starts=action_starts,
+            action_ends=action_ends,
+            expert_segments=expert_segments,
+            two_expert_layout=two_expert_layout,
         )
 
         # Fully Connected
@@ -271,17 +370,31 @@ class Qwen2_5_VLDecoderLayer_with_MoE(nn.Module, ActionModelMixMin):
             adarms_conds,
             self.post_attention_layernorms,
             self.post_attention_layernorm,
-            start_indices,
-            end_indices,
-            self.use_selective_recompute,
+            action_starts=action_starts,
+            action_ends=action_ends,
+            expert_segments=expert_segments,
+            two_expert_layout=two_expert_layout,
+            use_selective_recompute=self.use_selective_recompute,
         )
 
         hidden_states = self._apply_mlp_moe(
-            hidden_states, token_types, start_indices, end_indices
+            hidden_states,
+            token_types,
+            action_starts=action_starts,
+            action_ends=action_ends,
+            expert_segments=expert_segments,
+            two_expert_layout=two_expert_layout,
         )
 
         hidden_states = self._gated_residual(
-            residual, hidden_states, gate, start_indices, end_indices
+            residual,
+            hidden_states,
+            gate,
+            token_types=token_types,
+            action_starts=action_starts,
+            action_ends=action_ends,
+            expert_segments=expert_segments,
+            two_expert_layout=two_expert_layout,
         )
 
         outputs = (hidden_states,)
@@ -356,8 +469,36 @@ class Qwen2_5_VLMoEModel(Qwen2_5_VLPreTrainedModel, ActionModelMixMin):
         self.rotary_emb = Qwen2_5_VLRotaryEmbedding(config=config)
 
         self.gradient_checkpointing = False
+        # Partial recompute: only the first N decoder layers are checkpointed
+        # (None = all layers). Set via Qwen2_5_VLMoEForAction.
+        # gradient_checkpointing_enable(num_layers=...), probed by
+        # distribution_strategy._maybe_enable_grad_ckpt.
+        self.gradient_checkpoint_num_layers = None
         # Initialize weights and apply final processing
         self.post_init()
+
+    def _resolve_two_expert_layout(
+        self,
+        moe_token_types: torch.Tensor,
+        action_starts: Optional[torch.Tensor] = None,
+        action_ends: Optional[torch.Tensor] = None,
+        device: Optional[torch.device] = None,
+    ) -> TwoExpertLayout:
+        if self.config.num_experts != 2:
+            raise ValueError(
+                "mot_opt fixed scatter path requires config.num_experts == 2"
+            )
+        if moe_token_types is None or moe_token_types.dim() != 2:
+            raise ValueError("mot_opt fixed scatter path expects [B, S] token types")
+
+        return prepare_two_expert_layout(
+            moe_token_types,
+            batch_size=moe_token_types.size(0),
+            seq_length=moe_token_types.size(1),
+            action_starts=action_starts,
+            action_ends=action_ends,
+            device=device if device is not None else moe_token_types.device,
+        )
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -373,8 +514,9 @@ class Qwen2_5_VLMoEModel(Qwen2_5_VLPreTrainedModel, ActionModelMixMin):
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         moe_token_types: Optional[torch.LongTensor] = None,  # new parameter
-        start_indices: Optional[torch.Tensor] = None,
-        end_indices: Optional[torch.Tensor] = None,
+        action_starts: Optional[torch.Tensor] = None,
+        action_ends: Optional[torch.Tensor] = None,
+        two_expert_layout: Optional[TwoExpertLayout] = None,
         positional_masks: Optional[
             dict
         ] = None,  # stores token position masks needed by each category
@@ -408,10 +550,6 @@ class Qwen2_5_VLMoEModel(Qwen2_5_VLPreTrainedModel, ActionModelMixMin):
             )
         if moe_token_types is None:
             raise ValueError("moe_token_types must be provided for MoE routing")
-        if start_indices is None or end_indices is None:
-            raise ValueError(
-                "start_indices and end_indices must be provided for MoE routing"
-            )
 
         if self.gradient_checkpointing and self.training:
             if use_cache:
@@ -473,13 +611,21 @@ class Qwen2_5_VLMoEModel(Qwen2_5_VLPreTrainedModel, ActionModelMixMin):
         # When mot_opt is enabled, permute tokens from different experts first; shape becomes [Tokens, HiddenSize]
         orig_shape = hidden_states.shape
         moe_token_types = moe_token_types.contiguous()
-        if self.config.mot_opt:
-            hidden_states = hidden_states.view(-1, hidden_states.size(-1))
-            hidden_states, row_id_map = permute(hidden_states, moe_token_types.view(-1))
+        if self.config.mot_opt or self.config.mlp_moe:
+            if two_expert_layout is None:
+                two_expert_layout = self._resolve_two_expert_layout(
+                    moe_token_types,
+                    action_starts=action_starts,
+                    action_ends=action_ends,
+                    device=hidden_states.device,
+                )
+            action_starts = two_expert_layout.action_starts
+            action_ends = two_expert_layout.action_ends
+            expert_segments = two_expert_layout.expert_segments
         else:
-            row_id_map = None
-        # Use reshape instead of view to support non-contiguous tensors
-        probs = torch.ones_like(moe_token_types, dtype=torch.float32).reshape(-1, 1)
+            expert_segments = None
+        if self.config.mot_opt:
+            hidden_states = two_expert_pack(hidden_states, two_expert_layout)
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -508,52 +654,44 @@ class Qwen2_5_VLMoEModel(Qwen2_5_VLPreTrainedModel, ActionModelMixMin):
                 positional_masks=positional_masks,
             )
 
-        for decoder_layer in self.layers:
+        n_ckpt_layers = self.gradient_checkpoint_num_layers
+        if n_ckpt_layers is None or not 0 <= n_ckpt_layers <= len(self.layers):
+            n_ckpt_layers = len(self.layers)
+
+        for layer_idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 assert (
                     self.config.mot_opt is False
                 ), "When using mot_opt, output_hidden_states is not supported yet."
                 all_hidden_states += (hidden_states,)
 
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    decoder_layer.__call__,
-                    hidden_states,
-                    causal_mask,
-                    position_ids,
-                    past_key_values,
-                    output_attentions,
-                    use_cache,
-                    cache_position,
-                    position_embeddings,
-                    # for vla
-                    moe_token_types,
-                    start_indices,
-                    end_indices,
-                    probs,
-                    row_id_map,
-                    orig_shape,
-                    adarms_conds,
-                )
-            else:
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=causal_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_values,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    cache_position=cache_position,
-                    position_embeddings=position_embeddings,
-                    # for vla
-                    token_types=moe_token_types,
-                    start_indices=start_indices,
-                    end_indices=end_indices,
-                    probs=probs,
-                    row_id_map=row_id_map,
-                    orig_shape=orig_shape,
-                    adarms_conds=adarms_conds,
-                )
+            # wall_x.utils.checkpoint（use_reentrant=False / preserve_rng_state=False
+            # 固化，见该模块 docstring）：enabled=False 时直接裸调，替代原
+            # HF _gradient_checkpointing_func + if/else 双分支。
+            layer_outputs = maybe_checkpoint(
+                decoder_layer.__call__,
+                hidden_states,
+                attention_mask=causal_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+                # for vla
+                token_types=moe_token_types,
+                orig_shape=orig_shape,
+                action_starts=action_starts,
+                action_ends=action_ends,
+                expert_segments=expert_segments,
+                two_expert_layout=two_expert_layout,
+                adarms_conds=adarms_conds,
+                enabled=(
+                    self.gradient_checkpointing
+                    and self.training
+                    and layer_idx < n_ckpt_layers
+                ),
+            )
             hidden_states = layer_outputs[0]
 
             if use_cache:
@@ -568,9 +706,11 @@ class Qwen2_5_VLMoEModel(Qwen2_5_VLPreTrainedModel, ActionModelMixMin):
             adarms_conds,
             self.norms,
             self.norm,
-            start_indices,
-            end_indices,
-            self.use_selective_recompute,
+            action_starts=action_starts,
+            action_ends=action_ends,
+            expert_segments=expert_segments,
+            two_expert_layout=two_expert_layout,
+            use_selective_recompute=self.use_selective_recompute,
         )
 
         # add hidden states from the last decoder layer
@@ -583,8 +723,12 @@ class Qwen2_5_VLMoEModel(Qwen2_5_VLPreTrainedModel, ActionModelMixMin):
         next_cache = next_decoder_cache if use_cache else None
 
         if self.config.mot_opt:
-            hidden_states = unpermute(hidden_states, row_id_map, probs)
-            hidden_states = hidden_states.view(orig_shape)
+            hidden_states = two_expert_unpack(
+                hidden_states,
+                orig_shape[0],
+                orig_shape[1],
+                two_expert_layout,
+            )
 
         if not return_dict:
             return tuple(
@@ -861,6 +1005,23 @@ class Qwen2_5_VLMoEForAction(
             use_selective_recompute=use_selective_recompute,
         )
 
+    def gradient_checkpointing_enable(
+        self, gradient_checkpointing_kwargs=None, num_layers=None
+    ):
+        """Partial recompute: `num_layers` limits full-recompute to the first N
+        decoder layers (None = all, legacy). The `num_layers` parameter name is
+        what distribution_strategy._maybe_enable_grad_ckpt probes for; vision
+        blocks are unaffected (still all checkpointed)."""
+        self.model.gradient_checkpoint_num_layers = num_layers
+        if gradient_checkpointing_kwargs is None:
+            # HF default is reentrant checkpoint, which rejects the extra
+            # kwargs the vision block forward takes (cu_seqlens/...) and is
+            # incompatible with FSDP2 nested fully_shard (see
+            # wall_x/utils/checkpoint.py docstring). Previously papered over
+            # by an exp-side sitecustomize shim; make False the in-repo default.
+            gradient_checkpointing_kwargs = {"use_reentrant": False}
+        super().gradient_checkpointing_enable(gradient_checkpointing_kwargs)
+
     def _post_init_engine(self, config):
         """Hook called at the end of __init__. Subclasses may override to add engine-specific state."""
         pass
@@ -882,6 +1043,29 @@ class Qwen2_5_VLMoEForAction(
 
     def get_decoder(self):
         return self.model
+
+    def _prepare_two_expert_layout_for_model(
+        self,
+        moe_token_types: Optional[torch.Tensor],
+        inputs_embeds: Optional[torch.Tensor],
+        action_starts: Optional[torch.Tensor] = None,
+        action_ends: Optional[torch.Tensor] = None,
+    ) -> Optional[TwoExpertLayout]:
+        if not (self.model.config.mot_opt or self.model.config.mlp_moe):
+            return None
+        if moe_token_types is None:
+            return None
+        device = (
+            inputs_embeds.device
+            if inputs_embeds is not None
+            else moe_token_types.device
+        )
+        return self.model._resolve_two_expert_layout(
+            moe_token_types,
+            action_starts=action_starts,
+            action_ends=action_ends,
+            device=device,
+        )
 
     def get_rope_index(
         self,
@@ -1116,8 +1300,6 @@ class Qwen2_5_VLMoEForAction(
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         moe_token_types: Optional[torch.LongTensor] = None,
-        start_indices: Optional[torch.Tensor] = None,
-        end_indices: Optional[torch.Tensor] = None,
         positional_masks: Optional[torch.LongTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
@@ -1150,18 +1332,6 @@ class Qwen2_5_VLMoEForAction(
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
-
-        if start_indices is None or end_indices is None:
-            # Compute start and end positions for each expert token group after permutation; the dataset has no num_expert metadata, so this is computed here
-            group_size = torch.zeros(
-                self.config.num_experts, dtype=torch.long, device="cpu"
-            )
-            for i in range(self.config.num_experts):
-                group_size[i] = (moe_token_types == i).sum()
-
-            # Calculate start and end indices for each expert group
-            start_indices = torch.cumsum(group_size, dim=0) - group_size
-            end_indices = torch.cumsum(group_size, dim=0)
 
         # if we get 4D attention mask we cannot calculate rope deltas anymore. TODO @raushan fixme
         if position_ids is None and (
@@ -1246,6 +1416,12 @@ class Qwen2_5_VLMoEForAction(
             if attention_mask is not None:
                 attention_mask = attention_mask.to(inputs_embeds.device)
 
+        two_expert_layout = self._prepare_two_expert_layout_for_model(
+            moe_token_types,
+            inputs_embeds,
+            action_starts=kwargs.get("action_starts"),
+            action_ends=kwargs.get("action_ends"),
+        )
         outputs = self.model(
             input_ids=None,
             position_ids=position_ids,
@@ -1253,14 +1429,13 @@ class Qwen2_5_VLMoEForAction(
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             moe_token_types=moe_token_types,  # pass token_types
-            start_indices=start_indices,
-            end_indices=end_indices,
             positional_masks=positional_masks,  # pass masks for each category
             use_cache=False,
             output_attentions=True,
             output_hidden_states=False,
             return_dict=return_dict,
             adarms_conds=[None, adarms_cond],
+            two_expert_layout=two_expert_layout,
             # cache_position=cache_position,
         )
         attention_maps = torch.stack(outputs.attentions, dim=0)[
@@ -1293,8 +1468,6 @@ class Qwen2_5_VLMoEForAction(
         # for vla
         sample_time: Optional[torch.FloatTensor] = None,
         moe_token_types: Optional[torch.LongTensor] = None,
-        start_indices: Optional[torch.Tensor] = None,
-        end_indices: Optional[torch.Tensor] = None,
         positional_masks: Optional[dict] = None,
         action_chunk: Optional[torch.FloatTensor] = None,
         proprioception: Optional[torch.FloatTensor] = None,
@@ -1320,18 +1493,6 @@ class Qwen2_5_VLMoEForAction(
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
-
-        if start_indices is None or end_indices is None:
-            # Compute start and end positions for each expert token group after permutation; the dataset has no num_expert metadata, so this is computed here
-            group_size = torch.zeros(
-                self.config.num_experts, dtype=torch.long, device="cpu"
-            )
-            for i in range(self.config.num_experts):
-                group_size[i] = (moe_token_types == i).sum()
-
-            # Calculate start and end indices for each expert group
-            start_indices = torch.cumsum(group_size, dim=0) - group_size
-            end_indices = torch.cumsum(group_size, dim=0)
 
         # if we get 4D attention mask we cannot calculate rope deltas anymore. TODO @raushan fixme
         if position_ids is None and (
@@ -1421,6 +1582,12 @@ class Qwen2_5_VLMoEForAction(
             if attention_mask is not None:
                 attention_mask = attention_mask.to(inputs_embeds.device)
 
+        two_expert_layout = self._prepare_two_expert_layout_for_model(
+            moe_token_types,
+            inputs_embeds,
+            action_starts=kwargs.get("action_starts"),
+            action_ends=kwargs.get("action_ends"),
+        )
         outputs = self.model(
             input_ids=None,
             position_ids=position_ids,
@@ -1428,14 +1595,13 @@ class Qwen2_5_VLMoEForAction(
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             moe_token_types=moe_token_types,  # pass token_types
-            start_indices=start_indices,
-            end_indices=end_indices,
             positional_masks=positional_masks,  # pass masks for each category
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             adarms_conds=[None, adarms_cond],
+            two_expert_layout=two_expert_layout,
             # cache_position=cache_position,
         )
 
@@ -1444,19 +1610,17 @@ class Qwen2_5_VLMoEForAction(
         # --- optimization: loss-token-only LM Head ---
         # During training, only compute lm_head for tokens that contribute to CE loss,
         # reducing GEMM size from [B*S, V] to [N_loss, V].
-        # FSDP fp32 layernorms emit fp32 hidden_states; lm_head runs in bf16.
-        _lm_dtype = self.lm_head.weight.dtype
         _lm_loss_mask = None
         if labels is not None and self.training:
             shift_labels = labels[..., 1:].contiguous()
             _lm_loss_mask = shift_labels != -100  # [B, S-1]
             if _lm_loss_mask.any():
                 lm_hidden = hidden_states[:, :-1, :][_lm_loss_mask]  # [N_loss, H]
-                logits = self.lm_head(lm_hidden.to(_lm_dtype))  # [N_loss, V]
+                logits = self.lm_head(lm_hidden)  # [N_loss, V]
             else:
                 logits = None
         else:
-            logits = self.lm_head(hidden_states.to(_lm_dtype))
+            logits = self.lm_head(hidden_states)
 
         (
             loss,
@@ -1517,8 +1681,6 @@ class Qwen2_5_VLMoEForAction(
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         moe_token_types: Optional[torch.LongTensor] = None,  # new parameter
-        start_indices: Optional[torch.Tensor] = None,
-        end_indices: Optional[torch.Tensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
@@ -1568,25 +1730,11 @@ class Qwen2_5_VLMoEForAction(
         else:
             prefix_length = input_ids.shape[1]
 
-        if start_indices is None or end_indices is None:
-            # Compute start and end positions for each expert token group after permutation; the dataset has no num_expert metadata, so this is computed here
-            group_size = torch.zeros(
-                self.config.num_experts, dtype=torch.long, device="cpu"
-            )
-            for i in range(self.config.num_experts):
-                group_size[i] = (moe_token_types == i).sum()
-
-            # Calculate start and end indices for each expert group
-            start_indices = torch.cumsum(group_size, dim=0) - group_size
-            end_indices = torch.cumsum(group_size, dim=0)
-
         batch = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "pixel_values": pixel_values,
             "moe_token_types": moe_token_types,
-            "start_indices": start_indices,
-            "end_indices": end_indices,
             "image_grid_thw": image_grid_thw,
             "dof_mask": dof_mask,
             "agent_pos_mask": agent_pos_mask,
@@ -1778,8 +1926,6 @@ class Qwen2_5_VLMoEForAction(
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         moe_token_types: Optional[torch.LongTensor] = None,
-        start_indices: Optional[torch.Tensor] = None,
-        end_indices: Optional[torch.Tensor] = None,
         positional_masks: Optional[torch.LongTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
@@ -1814,8 +1960,6 @@ class Qwen2_5_VLMoEForAction(
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             moe_token_types=moe_token_types,
-            start_indices=start_indices,
-            end_indices=end_indices,
             positional_masks=positional_masks,
             labels=labels,
             use_cache=use_cache,
@@ -1865,8 +2009,6 @@ class Qwen2_5_VLMoEForAction(
         past_key_values,
         inputs_embeds,
         moe_token_types,
-        start_indices,
-        end_indices,
         positional_masks,
         labels,
         use_cache,
@@ -2023,29 +2165,6 @@ class Qwen2_5_VLMoEForAction(
                 )
             prefix_length = int(prefix_length[0].item())
 
-        if start_indices is None or end_indices is None:
-            # Compute start and end positions for each expert token group after permutation; the dataset has no num_expert metadata, so this is computed here
-            # Cache key: shape + sum is sufficient for stable-state (moe_token_types structure doesn't change)
-            _moe_key = (moe_token_types.shape, int(moe_token_types.sum().item()))
-            _moe_cache = self._infer_stable_cache.get("moe_indices")
-            if _moe_cache is None or _moe_cache[0] != _moe_key:
-                group_size = torch.zeros(
-                    self.config.num_experts, dtype=torch.long, device="cpu"
-                )
-                for i in range(self.config.num_experts):
-                    group_size[i] = (moe_token_types == i).sum()
-
-                # Calculate start and end indices for each expert group
-                start_indices = torch.cumsum(group_size, dim=0) - group_size
-                end_indices = torch.cumsum(group_size, dim=0)
-                self._infer_stable_cache["moe_indices"] = (
-                    _moe_key,
-                    start_indices,
-                    end_indices,
-                )
-            else:
-                _, start_indices, end_indices = _moe_cache
-
         # Timing: action initialization
         if action_chunk is not None:
             action_chunk = action_chunk.to(inputs_embeds.device).to(torch.float32)
@@ -2100,8 +2219,6 @@ class Qwen2_5_VLMoEForAction(
             "position_ids": position_ids,
             "prefix_length": prefix_length,
             "flow_action_mask": flow_action_mask,
-            "start_indices": start_indices,
-            "end_indices": end_indices,
             "dof_mask": dof_mask,
             "noise": noise,
             "noisy_action": noisy_action,
@@ -2123,6 +2240,12 @@ class Qwen2_5_VLMoEForAction(
         # Timing: prefill forward pass
         all_attention_maps = []
         output_attentions = True if ctx["output_attentions"] else False
+        two_expert_layout = self._prepare_two_expert_layout_for_model(
+            ctx["moe_token_types"],
+            ctx["inputs_embeds"],
+            action_starts=ctx.get("action_starts"),
+            action_ends=ctx.get("action_ends"),
+        )
         prefetch_output = self.model(
             input_ids=None,
             attention_mask=ctx["attention_mask"],
@@ -2130,14 +2253,13 @@ class Qwen2_5_VLMoEForAction(
             past_key_values=None,
             inputs_embeds=ctx["inputs_embeds"],
             moe_token_types=ctx["moe_token_types"],
-            start_indices=ctx["start_indices"],
-            end_indices=ctx["end_indices"],
             positional_masks=ctx["positional_masks"],
             use_cache=True,
             output_attentions=output_attentions,
             output_hidden_states=False,
             return_dict=True,
             adarms_conds=[None, ctx["adarms_cond"]],
+            two_expert_layout=two_expert_layout,
         )
         hidden_states = prefetch_output.last_hidden_state
         prefix_kv_cache = prefetch_output.past_key_values
@@ -2166,10 +2288,11 @@ class Qwen2_5_VLMoEForAction(
             _postfix_attention_mask,
             postfix_moe_token_types,
             postfix_input_ids,
-            postfix_start_indices,
-            postfix_end_indices,
             padding_mask,
         ) = self._prepare_flow_postfix(ctx, prefix_kv_cache)
+        postfix_two_expert_layout = self._prepare_two_expert_layout_for_model(
+            postfix_moe_token_types, postfix_inputs_embeds
+        )
 
         def step_with_kvcache(timestep, noisy_action):
             action_mask = (
@@ -2192,13 +2315,12 @@ class Qwen2_5_VLMoEForAction(
                 past_key_values=prefix_kv_cache,
                 inputs_embeds=temp_inputs_embeds,
                 moe_token_types=postfix_moe_token_types,
-                start_indices=postfix_start_indices,
-                end_indices=postfix_end_indices,
                 use_cache=False,
                 output_attentions=output_attentions,
                 output_hidden_states=False,
                 return_dict=True,
                 adarms_conds=[None, adarms_cond],
+                two_expert_layout=postfix_two_expert_layout,
             )
             if output_attentions:
                 all_attention_maps.append(transformer_outputs.attentions)
@@ -2252,8 +2374,6 @@ class Qwen2_5_VLMoEForAction(
         postfix_moe_token_types = ctx["moe_token_types"][:, ctx["prefix_length"] :]
         postfix_input_ids = ctx["input_ids"][:, ctx["prefix_length"] :]
 
-        postfix_start_indices = None
-        postfix_end_indices = None
         padding_mask = None
 
         if prefix_kv_cache is not None:
@@ -2287,16 +2407,6 @@ class Qwen2_5_VLMoEForAction(
                     prefix_kv_cache.layers[layer_i].values = prefix_kv_cache.layers[
                         layer_i
                     ].values[:, :, : ctx["prefix_length"], :]
-
-            group_size = torch.zeros(
-                self.config.num_experts, dtype=torch.long, device="cpu"
-            )
-            for i in range(self.config.num_experts):
-                group_size[i] = (postfix_moe_token_types == i).sum()
-
-            # Calculate start and end indices for each expert group
-            postfix_start_indices = torch.cumsum(group_size, dim=0) - group_size
-            postfix_end_indices = torch.cumsum(group_size, dim=0)
 
             pad_token_id = self.processor.tokenizer.pad_token_id
             padding_mask = ctx["input_ids"] == pad_token_id
@@ -2334,20 +2444,22 @@ class Qwen2_5_VLMoEForAction(
             _postfix_attention_mask,
             postfix_moe_token_types,
             postfix_input_ids,
-            postfix_start_indices,
-            postfix_end_indices,
             padding_mask,
         )
 
     def _finalize_flow_action_output(self, action_trajectory, ctx):
-        predict_action = action_trajectory[-1]
+        predict_action_norm = action_trajectory[-1]
+        output = {"predict_action_norm": predict_action_norm}
+        if ctx["action_chunk"] is not None:
+            output["gt_action_norm"] = ctx["action_chunk"]
+
         predict_action = unnormalize_data_with_virtual_tail(
             self.action_preprocessor.normalizer_action,
-            predict_action,
+            predict_action_norm,
             ctx["dataset_names"],
             ctx.get("dof_mask"),
         )
-        output = {"predict_action": predict_action}
+        output["predict_action"] = predict_action
         if ctx["action_chunk"] is not None:
             output["gt_action"] = unnormalize_data_with_virtual_tail(
                 self.action_preprocessor.normalizer_action,
@@ -2377,8 +2489,6 @@ class Qwen2_5_VLMoEForAction(
         attention_mask=None,
         inputs_embeds=None,
         moe_token_types=None,
-        start_indices=None,
-        end_indices=None,
         cache_position=None,
         position_ids=None,
         use_cache=True,
@@ -2480,8 +2590,6 @@ class Qwen2_5_VLMoEForAction(
                 "position_ids": position_ids,
                 "past_key_values": past_key_values,
                 "moe_token_types": moe_token_types,
-                "start_indices": start_indices,
-                "end_indices": end_indices,
                 "use_cache": use_cache,
                 "attention_mask": attention_mask,
                 "pixel_values": pixel_values,
@@ -2867,7 +2975,7 @@ class Qwen2_5_VLMoEForAction(
                 )
 
         # =========================
-        # Phase 4: sanity check(optional)
+        # Phase 4: sanity check（optional）
         # =========================
         for k in fused.keys():
             assert not any(
@@ -2903,6 +3011,19 @@ class Qwen2_5_VLMoEForAction(
             if name in params_to_keep_float32:
                 param.data = param.data.to(torch.float32)
 
+    def convert_to_pure_dmuon_mix_precision(self):
+        """Prepare live parameter dtypes before pure DMuon wrapping."""
+
+        params_to_keep_float32 = []
+        for name, _ in self.named_parameters():
+            if any(k in name for k in ["action_preprocessor", "action_processor"]):
+                params_to_keep_float32.append(name)
+        for name, param in self.named_parameters():
+            if name in params_to_keep_float32:
+                param.data = param.data.to(torch.float32)
+            else:
+                param.data = param.data.to(torch.bfloat16)
+
     def convert_to_fsdp(
         self,
         *,
@@ -2911,6 +3032,7 @@ class Qwen2_5_VLMoEForAction(
         offload_policy=None,
         reshard_after_forward: bool = True,
         use_dmuon: bool = False,
+        dmuon_owner_kwargs=None,
     ):
         """Wrap with FSDP2: per-decoder-layer + per-vision-block fully_shard
         with bf16 ``mp_policy``; layernorms and ``action_preprocessor`` leaves
@@ -2921,10 +3043,10 @@ class Qwen2_5_VLMoEForAction(
         ``mesh`` and ``mp_policy`` are required and produced by
         ``FSDPStrategy._build_fsdp2_layout``. The pre-migration FSDP1 wrap
         used ``ShardingStrategy.SHARD_GRAD_OP`` regardless of the yaml
-        config; the new path honors ``fsdp_sharding_strategy`` (default
-        ``full_shard`` -> ``reshard_after_forward=True``). Active runs that
+        config; the new path honors ``distributed.fsdp.sharding_strategy``
+        (default ``full_shard`` -> ``reshard_after_forward=True``). Active runs that
         relied on the implicit SHARD_GRAD_OP throughput should set
-        ``distributed.fsdp_sharding_strategy: shard_grad_op`` explicitly.
+        ``distributed.fsdp.sharding_strategy: shard_grad_op`` explicitly.
 
         When ``use_dmuon=True``, DMuon owns selected trainable
         matrix weights before the remaining parameters are wrapped by FSDP2.
@@ -2933,6 +3055,7 @@ class Qwen2_5_VLMoEForAction(
 
         if use_dmuon:
             import dmuon
+            from wall_x.trainer.optimizer.dmuon.utils import dmuon_dedicate_mesh_args
 
             # DMuon keeps fp32 master weights for dedicated params; symmetric
             # FSDP2 params still use MixedPrecisionPolicy for bf16 compute.
@@ -2945,31 +3068,47 @@ class Qwen2_5_VLMoEForAction(
                 for module in self.action_preprocessor.modules()
                 if isinstance(module, nn.Linear)
             }
+            dmuon_sharded_adamw_module_ids = {
+                id(module)
+                for module in (
+                    getattr(self, "lm_head", None),
+                    getattr(getattr(self, "model", None), "embed_tokens", None),
+                )
+                if isinstance(module, (nn.Embedding, nn.Linear))
+            }
 
             def hook_boundary(module: nn.Module) -> bool:
                 # ActionProcessor helper methods call internal Linear layers
                 # directly, bypassing ActionProcessor.forward(). Those internal
                 # Linear layers need their own hooks.
-                if id(module) in action_preprocessor_linear_ids:
+                if (
+                    id(module) in action_preprocessor_linear_ids
+                    or id(module) in dmuon_sharded_adamw_module_ids
+                ):
                     return True
                 return isinstance(
                     module,
                     (
                         Qwen2_5_VLDecoderLayer_with_MoE,
                         Qwen2_5_VLVisionBlock,
+                        Qwen2_5_VisionPatchEmbed,
                         Qwen2_5_VLPatchMerger,
                         type(self.action_preprocessor),
                     ),
                 )
 
+            dmuon_mesh, dmuon_mesh_kwargs = dmuon_dedicate_mesh_args(mesh)
             assignment = dmuon.dedicate_params(
                 self,
-                mesh,
-                predicate=_is_qwen25_dmuon_target_param,
+                dmuon_mesh,
+                predicate=_is_qwen25_dmuon_managed_param,
+                route_hint_fn=_qwen25_dmuon_route_hint,
                 hook_boundary_predicate=hook_boundary,
                 hook_boundary_strict=True,
                 compute_dtype=torch.bfloat16,
                 reshard_after_forward=reshard_after_forward,
+                **dmuon_mesh_kwargs,
+                **(dmuon_owner_kwargs or {}),
             )
             logger.info(
                 "[Qwen2.5 FSDP2 + DMuon] dedicate_params: %d params assigned",
@@ -3017,17 +3156,17 @@ class Qwen2_5_VLMoEForAction(
             fully_shard(module, **fp32_shard_kwargs)
 
         # Layernorm leaves inside decoder layers / vision blocks / model.norm
-        # - wrap with fp32 mp_policy BEFORE wrapping their parents so the
+        # — wrap with fp32 mp_policy BEFORE wrapping their parents so the
         # nested policy survives. Match-by-FQN mirrors the FSDP1 logic.
-        for module_name, module in list(self.named_modules()):
-            for child_name, child in list(module.named_children()):
-                if any(
-                    k in child_name.lower()
-                    for k in ("input_layernorm", "post_attention_layernorm")
-                ) or ("norm" in child_name.lower() and module_name.endswith("model")):
-                    fully_shard_fp32_leaf_or_container(
-                        f"{module_name}.{child_name}", child
-                    )
+        # for module_name, module in list(self.named_modules()):
+        #     for child_name, child in list(module.named_children()):
+        #         if any(
+        #             k in child_name.lower()
+        #             for k in ("input_layernorm", "post_attention_layernorm")
+        #         ) or ("norm" in child_name.lower() and module_name.endswith("model")):
+        #             fully_shard_fp32_leaf_or_container(
+        #                 f"{module_name}.{child_name}", child
+        #             )
 
         # action_preprocessor leaves: same fp32 treatment as layernorms.
         for name, module in list(self.named_modules()):
@@ -3062,4 +3201,99 @@ class Qwen2_5_VLMoEForAction(
         # nested fully_shard. Inner fp32 wraps maintain their own policy.
         logger.info("[FSDP2] fully_shard root (bf16)")
         fully_shard(self, **shard_kwargs)
+        return self
+
+    def convert_to_dmuon(
+        self, *, mesh, reshard_after_forward: bool = False, dmuon_owner_kwargs=None
+    ):
+        """Install pure DMuon ownership without calling FSDP2 ``fully_shard``."""
+        import dmuon
+        from wall_x.trainer.optimizer.dmuon.policy import (
+            make_wallx_action_fp32_dmuon_param_policy_fn,
+            summarize_dmuon_param_policy,
+        )
+        from wall_x.trainer.optimizer.dmuon.utils import dmuon_dedicate_mesh_args
+
+        trainable_count = sum(1 for _, p in self.named_parameters() if p.requires_grad)
+        route_counts, route_examples = _validate_qwen25_pure_dmuon_route_plan(
+            self.named_parameters()
+        )
+        logger.info(
+            "[Qwen2.5 Pure DMuon] route plan: counts=%s examples=%s",
+            route_counts,
+            _format_qwen25_route_examples(route_examples),
+        )
+
+        # DMuon keeps fp32 master weights for dedicated params.
+        for param in self.parameters():
+            if param.requires_grad and param.dtype != torch.float32:
+                param.data = param.data.float()
+
+        action_preprocessor_linear_ids = {
+            id(module)
+            for module in self.action_preprocessor.modules()
+            if isinstance(module, nn.Linear)
+        }
+        dmuon_sharded_adamw_module_ids = {
+            id(module)
+            for module in (
+                getattr(self, "lm_head", None),
+                getattr(getattr(self, "model", None), "embed_tokens", None),
+            )
+            if isinstance(module, (nn.Embedding, nn.Linear))
+        }
+
+        def hook_boundary(module: nn.Module) -> bool:
+            if (
+                id(module) in action_preprocessor_linear_ids
+                or id(module) in dmuon_sharded_adamw_module_ids
+            ):
+                return True
+            return isinstance(
+                module,
+                (
+                    Qwen2_5_VLDecoderLayer_with_MoE,
+                    Qwen2_5_VLVisionBlock,
+                    Qwen2_5_VisionPatchEmbed,
+                    Qwen2_5_VLPatchMerger,
+                    type(self.action_preprocessor),
+                ),
+            )
+
+        dmuon_mesh, dmuon_mesh_kwargs = dmuon_dedicate_mesh_args(mesh)
+        param_policy_fn = make_wallx_action_fp32_dmuon_param_policy_fn(
+            _qwen25_pure_dmuon_route_hint
+        )
+        policy_counts, policy_examples = summarize_dmuon_param_policy(
+            self.named_parameters(), param_policy_fn
+        )
+        logger.info(
+            "[Qwen2.5 Pure DMuon] param policy: counts=%s examples=%s",
+            policy_counts,
+            _format_qwen25_route_examples(policy_examples),
+        )
+        assignment = dmuon.dedicate_params(
+            self,
+            dmuon_mesh,
+            predicate=_is_qwen25_dmuon_trainable_param,
+            param_policy_fn=param_policy_fn,
+            hook_boundary_predicate=hook_boundary,
+            hook_boundary_strict=False,
+            reshard_after_forward=reshard_after_forward,
+            **dmuon_mesh_kwargs,
+            **(dmuon_owner_kwargs or {}),
+        )
+        logger.info(
+            "[Qwen2.5 Pure DMuon] dedicate_params: %d/%d trainable params "
+            "assigned (reshard_after_forward=%s)",
+            len(assignment),
+            trainable_count,
+            reshard_after_forward,
+        )
+        if len(assignment) != trainable_count:
+            logger.warning(
+                "[Qwen2.5 Pure DMuon] only %d/%d trainable params were assigned",
+                len(assignment),
+                trainable_count,
+            )
         return self

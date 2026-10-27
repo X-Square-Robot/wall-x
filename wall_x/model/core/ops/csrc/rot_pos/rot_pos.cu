@@ -1,5 +1,4 @@
-#include <torch/extension.h>
-#include <c10/cuda/CUDAStream.h>
+#include "tensor_view.h"
 
 #include <cuda_fp16.h>
 #include <cub/cub.cuh>
@@ -194,11 +193,11 @@ __global__ void compute_token_counts_kernel_int64(
 }
 
 void GetTokenCounts(
-    const at::Tensor& grid_thw, // [num_grids, 3]
-    const at::Tensor& token_counts, // [num_grids]
+    wallx_cuda::TensorView grid_thw, // [num_grids, 3]
+    wallx_cuda::TensorView token_counts, // [num_grids]
     int spatial_merge_size
 ) {
-    ASSERT_CHECK(grid_thw.dim() == 2);
+    ASSERT_CHECK(grid_thw.ndim() == 2);
     ASSERT_CHECK(grid_thw.size(1) == 3);
     ASSERT_CHECK(grid_thw.size(0) == token_counts.size(0));
 
@@ -210,15 +209,15 @@ void GetTokenCounts(
     const int blocks = (num_grids + threads - 1) / threads;
 
     cudaStream_t stream = static_cast<cudaStream_t>(
-        at::cuda::getCurrentCUDAStream().stream());
+        wallx_cuda::CurrentStream(grid_thw.device().device_type, grid_thw.device().device_id));
 
-    if (grid_thw.scalar_type() == at::kInt) {
+    if (grid_thw.dtype().code == kDLInt && grid_thw.dtype().bits == 32) {
         compute_token_counts_kernel_int32<<<blocks, threads, 0, stream>>>(
             static_cast<int32_t*>(grid_thw.data_ptr()),
             static_cast<int32_t*>(token_counts.data_ptr()),
             spatial_merge_size,
             num_grids);
-    } else if (grid_thw.scalar_type() == at::kLong) {
+    } else if (grid_thw.dtype().code == kDLInt && grid_thw.dtype().bits == 64) {
         compute_token_counts_kernel_int64<<<blocks, threads, 0, stream>>>(
             static_cast<int64_t*>(grid_thw.data_ptr()),
             static_cast<int64_t*>(token_counts.data_ptr()),
@@ -232,15 +231,15 @@ void GetTokenCounts(
 }
 
 void RotPosEmb(
-    const at::Tensor& inv_freq, // [dim/2]
-    const at::Tensor& grid_thw, // [num_grids, 3]
-    const at::Tensor& output,
-    const at::Tensor& cumsum_tokens,
+    wallx_cuda::TensorView inv_freq, // [dim/2]
+    wallx_cuda::TensorView grid_thw, // [num_grids, 3]
+    wallx_cuda::TensorView output,
+    wallx_cuda::TensorView cumsum_tokens,
     int spatial_merge_size
 ) {
     ASSERT_CHECK(output.size(0) > 0);
-    ASSERT_CHECK(inv_freq.dim() == 1);
-    ASSERT_CHECK(inv_freq.scalar_type() == at::kFloat);
+    ASSERT_CHECK(inv_freq.ndim() == 1);
+    ASSERT_CHECK(inv_freq.dtype().code == kDLFloat && inv_freq.dtype().bits == 32);
 
     const int dim_half = inv_freq.size(0);
     const int num_grids = grid_thw.size(0);
@@ -251,9 +250,9 @@ void RotPosEmb(
     const int threads_per_block = 256;
     const int num_blocks = static_cast<int>((num_elements + threads_per_block - 1) / threads_per_block);
     cudaStream_t stream = static_cast<cudaStream_t>(
-        at::cuda::getCurrentCUDAStream().stream());
+        wallx_cuda::CurrentStream(grid_thw.device().device_type, grid_thw.device().device_id));
 
-    if (grid_thw.scalar_type() == at::kInt) {
+    if (grid_thw.dtype().code == kDLInt && grid_thw.dtype().bits == 32) {
         fused_rot_pos_emb_kernel_int32<<<num_blocks, threads_per_block, dim_half * sizeof(float), stream>>>(
             static_cast<float*>(inv_freq.data_ptr()),
             static_cast<int32_t*>(grid_thw.data_ptr()),
@@ -262,7 +261,7 @@ void RotPosEmb(
             dim_half,
             spatial_merge_size,
             num_grids);
-    } else if (grid_thw.scalar_type() == at::kLong) {
+    } else if (grid_thw.dtype().code == kDLInt && grid_thw.dtype().bits == 64) {
         fused_rot_pos_emb_kernel_int64<<<num_blocks, threads_per_block, dim_half * sizeof(float), stream>>>(
             static_cast<float*>(inv_freq.data_ptr()),
             static_cast<int64_t*>(grid_thw.data_ptr()),
@@ -278,7 +277,7 @@ void RotPosEmb(
     sync_check_cuda_error();
 }
 
-// Removed TVM FFI export (see pybind11 registration)
-// Removed TVM FFI export (see pybind11 registration)
+
+
 
 } // wallx_cuda_rot_pos

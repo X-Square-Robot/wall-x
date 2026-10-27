@@ -13,18 +13,45 @@ import random
 import numpy as np
 
 
+class DirectEnvHandle:
+    def __init__(self, cfg, worker_id: int):
+        import wall_x._vendor.harrix.envs  # noqa: F401
+        from wall_x._vendor.harrix.envs.registry import build_env
+
+        self._env = build_env(cfg, worker_id)
+        self._pending = None
+
+    def submit_reset(self, ep_id):
+        self._pending = self._env.reset_episode(tuple(ep_id))
+
+    def wait_reset(self):
+        result = self._pending
+        self._pending = None
+        return result
+
+    def submit_execute_chunk(self, actions):
+        self._pending = self._env.execute_chunk(np.asarray(actions, dtype=np.float32))
+
+    def wait_execute_chunk(self):
+        result = self._pending
+        self._pending = None
+        return result
+
+    def shutdown(self) -> None:
+        self._env.shutdown()
+
+
 def _subproc_main(cfg, worker_id, child_conn):
     """Env subprocess entry point."""
-    # Spawned children inherit env vars, but set these explicitly for launchers
-    # that did not configure them. Robosuite validates the EGL id against the
-    # CUDA_VISIBLE_DEVICES environment string, so keep the same visible id here.
-    cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES") or "0"
-    os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
-    # EGL device index is always 0 after CUDA_VISIBLE_DEVICES remapping.
-    os.environ["MUJOCO_EGL_DEVICE_ID"] = os.environ.get("MUJOCO_EGL_DEVICE_ID") or "0"
+    # GPU visibility per env type:
+    # - LIBERO/robosuite: offscreen mujoco-EGL only, no CUDA. Drop the inherited
+    #   ``CUDA_VISIBLE_DEVICES`` — with a non-zero CVD robosuite's pre-import
+    #   ``MUJOCO_EGL_DEVICE_ID in CUDA_VISIBLE_DEVICES`` substring check and EGL's
+    #   own ``0..len(devices)-1`` range check are mutually exclusive. Unsetting
+    #   lets EGL default to device 0.
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
-    # Env workers run robosuite only. Do not import torch here; otherwise many
-    # subprocesses may initialize CUDA contexts and compete with the driver model.
+    # LIBERO env workers stay CUDA-free.
     seed = cfg.env.seed + worker_id
     np.random.seed(seed)
     random.seed(seed)
@@ -45,9 +72,6 @@ def _subproc_main(cfg, worker_id, child_conn):
                     result = env.reset_episode(tuple(args))
                 elif cmd == "execute_chunk":
                     result = env.execute_chunk(args)
-                elif cmd == "finalize_episode":
-                    env.finalize_episode(bool(args))
-                    result = None
                 elif cmd == "shutdown":
                     env.shutdown()
                     child_conn.send(("ok", None))
@@ -117,17 +141,6 @@ class SubprocEnvHandle:
 
     def wait_execute_chunk(self):
         return self._recv()
-
-    def submit_finalize_episode(self, success: bool):
-        self._send("finalize_episode", success)
-
-    def wait_finalize_episode(self):
-        return self._recv()
-
-    def finalize_episode(self, success: bool):
-        """Blocking convenience wrapper."""
-        self.submit_finalize_episode(success)
-        return self.wait_finalize_episode()
 
     def reset_episode(self, ep_id):
         """Blocking convenience wrapper."""

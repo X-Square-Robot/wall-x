@@ -1,21 +1,26 @@
-from typing import Optional, Tuple
-
 import torch
 import torch.nn as nn
-from flash_attn import flash_attn_func
-from transformers.cache_utils import Cache
-from transformers.modeling_flash_attention_utils import (
-    is_flash_attn_greater_or_equal_2_10,
-)
-from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLConfig
+from typing import Optional, Tuple
+
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     Qwen2_5_VLRotaryEmbedding,
     repeat_kv,
 )
+
+from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLConfig
+from transformers.cache_utils import Cache
 from transformers.utils import logging
 
-from wall_x.model.core.attention.mask import find_first_last_ones
-from wall_x.model.core.ops import m_rope, permute, unpermute
+from wall_x.model.core.ops.attention_mask import find_first_last_ones
+from wall_x.model.core.action.layout import TwoExpertLayout, prepare_two_expert_layout
+
+from wall_x.model.core.ops import m_rope, two_expert_pack, two_expert_unpack
+
+from flash_attn import flash_attn_func
+
+from transformers.modeling_flash_attention_utils import (
+    is_flash_attn_greater_or_equal_2_10,
+)
 
 try:
     from flash_mask.flash_mask_interface import flash_mask_attn_func
@@ -119,11 +124,11 @@ class JointQwen2VLAttention(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         token_types: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        start_indices: Optional[torch.Tensor] = None,
-        end_indices: Optional[torch.Tensor] = None,
-        probs: Optional[torch.Tensor] = None,
-        row_id_map: Optional[torch.Tensor] = None,
         orig_shape: Optional[Tuple[int]] = None,
+        action_starts: Optional[torch.Tensor] = None,
+        action_ends: Optional[torch.Tensor] = None,
+        expert_segments: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None,
+        two_expert_layout: Optional[TwoExpertLayout] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if token_types is None:
             raise ValueError("token_types must not be empty")
@@ -136,13 +141,13 @@ class JointQwen2VLAttention(nn.Module):
             bsz, q_len, _ = orig_shape
             query_states, key_states, value_states = self._generate_qkv_mot_opt(
                 hidden_states,
-                token_types,
-                start_indices,
-                end_indices,
-                probs,
-                row_id_map,
                 bsz,
                 q_len,
+                action_starts,
+                action_ends,
+                expert_segments,
+                two_expert_layout,
+                token_types,
             )
         else:
             bsz, q_len, _ = hidden_states.size()
@@ -262,7 +267,12 @@ class JointQwen2VLAttention(nn.Module):
 
         if self.config.mot_opt:
             output = self._generate_output_mot_opt(
-                attn_output, token_types, start_indices, end_indices
+                attn_output,
+                action_starts,
+                action_ends,
+                expert_segments,
+                two_expert_layout,
+                token_types,
             )
         else:
             output = self._generate_output(attn_output, masks)
@@ -350,24 +360,20 @@ class JointQwen2VLAttention(nn.Module):
     def _generate_qkv_mot_opt(
         self,
         hidden_states: torch.Tensor,
-        experts_indices: torch.Tensor,
-        start_indices: torch.Tensor,
-        end_indices: torch.Tensor,
-        probs: torch.Tensor,
-        row_id_map: torch.Tensor,
         batch_size: int,
         seq_length: int,
+        action_starts: torch.Tensor,
+        action_ends: torch.Tensor,
+        expert_segments: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None,
+        two_expert_layout: Optional[TwoExpertLayout] = None,
+        token_types: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Generate Q, K, V based on expert-sharded segments (start_indices / end_indices),
+        Generate Q, K, V based on fixed two-expert LLM/action segments,
         then restore them to the original sequence order.
 
         Args:
             hidden_states: [total_tokens, hidden_dim], tokens already permuted and grouped by experts
-            experts_indices: [B, S], expert index for each token
-            start_indices: start token index for each expert (in the permuted token space)
-            end_indices: end token index for each expert (in the permuted token space)
-            probs: probability vector for each token (used for unpermute)
             batch_size, seq_length: original batch size and sequence length
 
         Returns:
@@ -378,6 +384,16 @@ class JointQwen2VLAttention(nn.Module):
 
         total_tokens, hidden_dim = hidden_states.shape
         device, dtype = hidden_states.device, hidden_states.dtype
+        if two_expert_layout is None:
+            two_expert_layout = prepare_two_expert_layout(
+                token_types,
+                batch_size=batch_size,
+                seq_length=seq_length,
+                action_starts=action_starts,
+                action_ends=action_ends,
+                device=device,
+            )
+        expert_segments = two_expert_layout.expert_segments
 
         # Initialize Q/K/V buffers in the permuted token space
         q_buffer = torch.zeros(total_tokens, hidden_dim, device=device, dtype=dtype)
@@ -396,7 +412,7 @@ class JointQwen2VLAttention(nn.Module):
 
         # === Each expert processes its own token slice ===
         for expert_idx, qkv_proj in enumerate(self.qkv_proj_experts):
-            start, end = start_indices[expert_idx], end_indices[expert_idx]
+            start, end = expert_segments[expert_idx]
             if start == end:
                 continue
 
@@ -416,11 +432,15 @@ class JointQwen2VLAttention(nn.Module):
             k_buffer[start:end] = k_out
             v_buffer[start:end] = v_out
 
-        # === Restore tokens to the original order ===
-        #  unpermute (using the same unpermute operation)
-        q_unpermuted = unpermute(q_buffer, row_id_map, probs)
-        k_unpermuted = unpermute(k_buffer, row_id_map, probs)
-        v_unpermuted = unpermute(v_buffer, row_id_map, probs)
+        q_unpermuted = two_expert_unpack(
+            q_buffer, batch_size, seq_length, two_expert_layout
+        )
+        k_unpermuted = two_expert_unpack(
+            k_buffer, batch_size, seq_length, two_expert_layout
+        )
+        v_unpermuted = two_expert_unpack(
+            v_buffer, batch_size, seq_length, two_expert_layout
+        )
 
         # === Reshape to final form ===
         query_states = q_unpermuted.view(
@@ -481,12 +501,14 @@ class JointQwen2VLAttention(nn.Module):
     def _generate_output_mot_opt(
         self,
         attn_output: torch.Tensor,
-        experts_indices: torch.Tensor,
-        start_indices: torch.Tensor,
-        end_indices: torch.Tensor,
+        action_starts: torch.Tensor,
+        action_ends: torch.Tensor,
+        expert_segments: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None,
+        two_expert_layout: Optional[TwoExpertLayout] = None,
+        token_types: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Expert-sharded version of attn_output processing based on start_indices / end_indices.
+        Expert-sharded version of attn_output processing based on fixed LLM/action segments.
         Rearranges the [B, S, H] attn_output according to expert order (permute),
         applies the o_proj projection for each expert individually,
         and keeps the final output in expert order ([Tokens, Hidden])
@@ -494,21 +516,26 @@ class JointQwen2VLAttention(nn.Module):
 
         Args:
             attn_output: [B, S, hidden_dim]
-            experts_indices: [B, S], expert index for each token
-            start_indices, end_indices: start and end token indices for each expert
-                                        (in the permuted token space)
 
         Returns:
             output_buffer: [TotalTokens, hidden_dim], arranged in expert order
         """
 
-        _, _, hidden_dim = attn_output.shape
+        batch_size, seq_length, hidden_dim = attn_output.shape
         device, dtype = attn_output.device, attn_output.dtype
+        if two_expert_layout is None:
+            two_expert_layout = prepare_two_expert_layout(
+                token_types,
+                batch_size=batch_size,
+                seq_length=seq_length,
+                action_starts=action_starts,
+                action_ends=action_ends,
+                device=device,
+            )
+        expert_segments = two_expert_layout.expert_segments
 
-        # === 1. Flatten and reorder by expert assignment ===
-        flat_attn_output = attn_output.view(-1, hidden_dim)  # [B*S, H]
-        flat_expert_indices = experts_indices.reshape(-1)  # [B*S]
-        permuted_inputs, _ = permute(flat_attn_output, flat_expert_indices)
+        # === 1. Pack by fixed LLM/action layout, without sorting ===
+        permuted_inputs = two_expert_pack(attn_output, two_expert_layout)
         total_tokens = permuted_inputs.shape[0]
 
         # === 2. Initialize output buffer (still in permuted token space) ===
@@ -518,7 +545,7 @@ class JointQwen2VLAttention(nn.Module):
 
         # === 3. Each expert processes its own token segment independently ===
         for expert_idx, o_proj in enumerate(self.o_proj_experts):
-            start, end = start_indices[expert_idx], end_indices[expert_idx]
+            start, end = expert_segments[expert_idx]
             if start == end:
                 continue
 
@@ -558,11 +585,11 @@ class JointQwen2VLFlashAttention(JointQwen2VLAttention):
         position_embeddings: Optional[
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # necessary, but kept here for BC
-        start_indices: Optional[torch.Tensor] = None,
-        end_indices: Optional[torch.Tensor] = None,
-        probs: Optional[torch.Tensor] = None,
-        row_id_map: Optional[torch.Tensor] = None,
         orig_shape: Optional[Tuple[int]] = None,
+        action_starts: Optional[torch.Tensor] = None,
+        action_ends: Optional[torch.Tensor] = None,
+        expert_segments: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None,
+        two_expert_layout: Optional[TwoExpertLayout] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
 
         if token_types is None:
@@ -575,13 +602,13 @@ class JointQwen2VLFlashAttention(JointQwen2VLAttention):
             bsz, q_len, _ = orig_shape
             query_states, key_states, value_states = self._generate_qkv_mot_opt(
                 hidden_states,
-                token_types,
-                start_indices,
-                end_indices,
-                probs,
-                row_id_map,
                 bsz,
                 q_len,
+                action_starts,
+                action_ends,
+                expert_segments,
+                two_expert_layout,
+                token_types,
             )
         else:
             bsz, q_len, _ = hidden_states.size()
@@ -654,7 +681,12 @@ class JointQwen2VLFlashAttention(JointQwen2VLAttention):
 
         if self.config.mot_opt:
             output = self._generate_output_mot_opt(
-                attn_output, token_types, start_indices, end_indices
+                attn_output,
+                action_starts,
+                action_ends,
+                expert_segments,
+                two_expert_layout,
+                token_types,
             )
         else:
             output = self._generate_output(attn_output, masks)
@@ -679,11 +711,11 @@ class JointQwen2VLFlashMaskAttention(JointQwen2VLAttention):
         position_embeddings: Optional[
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # necessary, but kept here for BC
-        start_indices: Optional[torch.Tensor] = None,
-        end_indices: Optional[torch.Tensor] = None,
-        probs: Optional[torch.Tensor] = None,
-        row_id_map: Optional[torch.Tensor] = None,
         orig_shape: Optional[Tuple[int]] = None,
+        action_starts: Optional[torch.Tensor] = None,
+        action_ends: Optional[torch.Tensor] = None,
+        expert_segments: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None,
+        two_expert_layout: Optional[TwoExpertLayout] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if token_types is None:
             raise ValueError("token_types must not be empty")
@@ -696,13 +728,13 @@ class JointQwen2VLFlashMaskAttention(JointQwen2VLAttention):
             bsz, q_len, _ = orig_shape
             query_states, key_states, value_states = self._generate_qkv_mot_opt(
                 hidden_states,
-                token_types,
-                start_indices,
-                end_indices,
-                probs,
-                row_id_map,
                 bsz,
                 q_len,
+                action_starts,
+                action_ends,
+                expert_segments,
+                two_expert_layout,
+                token_types,
             )
         else:
             bsz, q_len, _ = hidden_states.size()
@@ -777,7 +809,12 @@ class JointQwen2VLFlashMaskAttention(JointQwen2VLAttention):
 
         if self.config.mot_opt:
             output = self._generate_output_mot_opt(
-                attn_output, token_types, start_indices, end_indices
+                attn_output,
+                action_starts,
+                action_ends,
+                expert_segments,
+                two_expert_layout,
+                token_types,
             )
         else:
             output = self._generate_output(attn_output, masks)
@@ -803,11 +840,11 @@ class JointQwen2VLFlashMaskAttention_KI(JointQwen2VLAttention):
         position_embeddings: Optional[
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # necessary, but kept here for BC
-        start_indices: Optional[torch.Tensor] = None,
-        end_indices: Optional[torch.Tensor] = None,
-        probs: Optional[torch.Tensor] = None,
-        row_id_map: Optional[torch.Tensor] = None,
         orig_shape: Optional[Tuple[int]] = None,
+        action_starts: Optional[torch.Tensor] = None,
+        action_ends: Optional[torch.Tensor] = None,
+        expert_segments: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None,
+        two_expert_layout: Optional[TwoExpertLayout] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if token_types is None:
             raise ValueError("token_types must not be empty")
@@ -820,13 +857,13 @@ class JointQwen2VLFlashMaskAttention_KI(JointQwen2VLAttention):
             bsz, q_len, _ = orig_shape
             query_states, key_states, value_states = self._generate_qkv_mot_opt(
                 hidden_states,
-                token_types,
-                start_indices,
-                end_indices,
-                probs,
-                row_id_map,
                 bsz,
                 q_len,
+                action_starts,
+                action_ends,
+                expert_segments,
+                two_expert_layout,
+                token_types,
             )
         else:
             bsz, q_len, _ = hidden_states.size()
@@ -907,7 +944,12 @@ class JointQwen2VLFlashMaskAttention_KI(JointQwen2VLAttention):
 
         if self.config.mot_opt:
             output = self._generate_output_mot_opt(
-                attn_output, token_types, start_indices, end_indices
+                attn_output,
+                action_starts,
+                action_ends,
+                expert_segments,
+                two_expert_layout,
+                token_types,
             )
         else:
             output = self._generate_output(attn_output, masks)

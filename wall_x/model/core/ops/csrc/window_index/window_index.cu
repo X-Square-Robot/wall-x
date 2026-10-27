@@ -1,4 +1,4 @@
-#include <torch/extension.h>
+#include "tensor_view.h"
 
 #include <cuda_fp16.h>
 #include <cassert>
@@ -209,14 +209,14 @@ __global__ void generate_window_indices(
 }
 
 void GetTotals(
-    const at::Tensor& grid_thw,
-    const at::Tensor& grid_info_tensor,
-    const at::Tensor& global_totals_tensor,
+    wallx_cuda::TensorView grid_thw,
+    wallx_cuda::TensorView grid_info_tensor,
+    wallx_cuda::TensorView global_totals_tensor,
     int spatial_merge_size,
     int vit_merger_window_size
 ) {
     ASSERT_CHECK(grid_thw.dim() == 2 && grid_thw.size(1) == 3);
-    ASSERT_CHECK(grid_thw.scalar_type() == at::kInt);
+    ASSERT_CHECK(grid_thw.dtype().code == kDLInt && grid_thw.dtype().bits == 32);
 
     int num_grids = grid_thw.size(0);
     const int *d_grid_thw = static_cast<int32_t*>(grid_thw.data_ptr());
@@ -235,11 +235,11 @@ void GetTotals(
 }
 
 void GetWindowIndex(
-    const at::Tensor& grid_thw,
-    const at::Tensor& grid_info_tensor,
-    const at::Tensor& window_indices,
-    const at::Tensor& cu_window_seqlens,
-    const at::Tensor& window_counts_tensor,
+    wallx_cuda::TensorView grid_thw,
+    wallx_cuda::TensorView grid_info_tensor,
+    wallx_cuda::TensorView window_indices,
+    wallx_cuda::TensorView cu_window_seqlens,
+    wallx_cuda::TensorView window_counts_tensor,
     int max_grid_t,
     int spatial_merge_size,
     int vit_merger_window_size,
@@ -278,7 +278,7 @@ void GetWindowIndex(
     sync_check_cuda_error();
 }
 
-// Removed TVM FFI export (see pybind11 registration)
-// Removed TVM FFI export (see pybind11 registration)
+
+
 
 } // wallx_cuda_window_index

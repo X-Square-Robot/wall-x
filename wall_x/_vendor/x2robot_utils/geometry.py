@@ -1,9 +1,9 @@
 """Rotation / pose geometry utilities (pure numpy + numba).
 
-Shared between wall-x and internal_dataset_backend:
-- ``euler_to_matrix_zyx_6d_nb``: ZYX Euler -> flattened top-2-rows of R (N, 6)
-- ``so3_to_euler_zyx_batch_nb``: 6D rotation -> ZYX Euler (canonicalized)
-- ``compose_state_and_delta_to_abs_{rpy,6d}``: state + delta -> absolute pose
+Shared between wall-x and its data pipeline:
+- ``euler_to_matrix_zyx_6d_nb``: ZYX Euler → flattened top-2-rows of R (N, 6)
+- ``so3_to_euler_zyx_batch_nb``: 6D rotation → ZYX Euler (canonicalized)
+- ``compose_state_and_delta_to_abs_{rpy,6d}``: state ⊕ delta → absolute pose
 """
 
 import numpy as np
@@ -12,7 +12,7 @@ from numba import jit, prange
 
 @jit(nopython=True)
 def euler_to_matrix_zyx_6d_nb(eulers):
-    """Euler angles (N, 3) -> flattened top two rows of rotation matrix (N, 6)."""
+    """Euler angles (N, 3) → flattened top two rows of rotation matrix (N, 6)."""
     N = eulers.shape[0]
     R6 = np.empty((N, 6), dtype=np.float64)
     for i in prange(N):
@@ -70,7 +70,7 @@ def euler_to_matrix_zyx_batch_nb(eulers):
 
 @jit(nopython=True)
 def matrix_to_euler_zyx_batch_nb(Rs):
-    """R = Rz(yaw) * Ry(pitch) * Rx(roll) -> (roll, pitch, yaw)."""
+    """R = Rz(yaw) * Ry(pitch) * Rx(roll) → (roll, pitch, yaw)."""
     N = Rs.shape[0]
     eulers = np.empty((N, 3), dtype=np.float64)
     for i in prange(N):
@@ -137,7 +137,7 @@ def so3_to_matrix_batch_nb(batch_so3):
 
 @jit(nopython=True)
 def canonicalize_euler_zyx_batch_nb(rpy_batch):
-    """Canonicalize ZYX Euler angles so each component falls in (-pi, pi]."""
+    """Canonicalize ZYX Euler angles so each component falls in (-π, π]."""
     N = rpy_batch.shape[0]
     out = np.empty_like(rpy_batch)
     two_pi = 2.0 * np.pi
@@ -179,10 +179,10 @@ def so3_to_euler_zyx_batch_nb(batch_so3):
 
 @jit(nopython=True)
 def compose_state_and_delta_to_abs_rpy(delta, state):
-    """Compose a delta (ZYX rpy or 6D) with an absolute state -> absolute rpy(ZYX).
+    """Compose a delta (ZYX rpy or 6D) with an absolute state → absolute rpy(ZYX).
 
-    delta: (N, 3) deltarpy or (N, 6) delta6D. state: (3,) rpy or (6,) 6D.
-    Output: (N, 3) rpy canonicalized into (-pi, pi].
+    delta: (N, 3) Δrpy or (N, 6) Δ6D. state: (3,) rpy or (6,) 6D.
+    Output: (N, 3) rpy canonicalized into (-π, π].
     """
     if delta.shape[-1] == 3:
         R_delta = euler_to_matrix_zyx_batch_nb(delta)
@@ -242,7 +242,7 @@ def compose_state_and_delta_to_abs_rpy(delta, state):
 
 @jit(nopython=True)
 def compose_state_and_delta_to_abs_6d(delta, state):
-    """Compose a 6D delta with a 6D state -> absolute 6D rotation.
+    """Compose a 6D delta with a 6D state → absolute 6D rotation.
 
     delta: (N, 6). state: (6,). Output: (N, 6).
     """
@@ -297,7 +297,68 @@ def compose_state_and_delta_to_abs_6d(delta, state):
     return abs_6d
 
 
+@jit(nopython=True, parallel=True)
+def compute_delta_from_state_and_abs_rot(rotations, state):
+    """Absolute rotations -> delta relative to ``state`` (inverse of compose_*).
+
+    Ported verbatim from the original data utilities so this shared
+    geometry module carries the full forward+inverse pair the RTC serving
+    abs->relative conversion needs. rotations: (N, 3|6); state: (3|6,).
+    """
+    if rotations.shape[-1] == 3:
+        rotations_matrix = euler_to_matrix_zyx_batch_nb(rotations)
+        out_is_euler = True
+    elif rotations.shape[-1] == 6:
+        rotations_matrix = so3_to_matrix_batch_nb(rotations)
+        out_is_euler = False
+    else:
+        raise ValueError(f"Only support 3D euler angle or 6D rotation, but got {rotations.shape[-1]}D")
+
+    if state.shape[-1] == 3:
+        state_matrix = euler_to_matrix_zyx_batch_nb(state[np.newaxis, :])[0]
+    elif state.shape[-1] == 6:
+        state_matrix = so3_to_matrix_batch_nb(state[np.newaxis, :])[0]
+    else:
+        raise ValueError(f"Only support 3D euler angle or 6D rotation, but got {state.shape[-1]}D")
+
+    ST = np.empty((3, 3), dtype=np.float64)
+    ST[0, 0] = state_matrix[0, 0]; ST[0, 1] = state_matrix[1, 0]; ST[0, 2] = state_matrix[2, 0]
+    ST[1, 0] = state_matrix[0, 1]; ST[1, 1] = state_matrix[1, 1]; ST[1, 2] = state_matrix[2, 1]
+    ST[2, 0] = state_matrix[0, 2]; ST[2, 1] = state_matrix[1, 2]; ST[2, 2] = state_matrix[2, 2]
+    N = rotations_matrix.shape[0]
+    R_rel = np.empty((N, 3, 3), dtype=np.float64)
+    for i in prange(N):
+        A00 = rotations_matrix[i, 0, 0]; A01 = rotations_matrix[i, 0, 1]; A02 = rotations_matrix[i, 0, 2]
+        A10 = rotations_matrix[i, 1, 0]; A11 = rotations_matrix[i, 1, 1]; A12 = rotations_matrix[i, 1, 2]
+        A20 = rotations_matrix[i, 2, 0]; A21 = rotations_matrix[i, 2, 1]; A22 = rotations_matrix[i, 2, 2]
+
+        R_rel[i, 0, 0] = A00*ST[0,0] + A01*ST[1,0] + A02*ST[2,0]
+        R_rel[i, 0, 1] = A00*ST[0,1] + A01*ST[1,1] + A02*ST[2,1]
+        R_rel[i, 0, 2] = A00*ST[0,2] + A01*ST[1,2] + A02*ST[2,2]
+        R_rel[i, 1, 0] = A10*ST[0,0] + A11*ST[1,0] + A12*ST[2,0]
+        R_rel[i, 1, 1] = A10*ST[0,1] + A11*ST[1,1] + A12*ST[2,1]
+        R_rel[i, 1, 2] = A10*ST[0,2] + A11*ST[1,2] + A12*ST[2,2]
+        R_rel[i, 2, 0] = A20*ST[0,0] + A21*ST[1,0] + A22*ST[2,0]
+        R_rel[i, 2, 1] = A20*ST[0,1] + A21*ST[1,1] + A22*ST[2,1]
+        R_rel[i, 2, 2] = A20*ST[0,2] + A21*ST[1,2] + A22*ST[2,2]
+
+    if out_is_euler:
+        d_euler = matrix_to_euler_zyx_batch_nb(R_rel)
+        return canonicalize_euler_zyx_batch_nb(d_euler)
+    else:
+        out6 = np.empty((N, 6), dtype=np.float64)
+        for i in prange(N):
+            out6[i, 0] = R_rel[i, 0, 0]
+            out6[i, 1] = R_rel[i, 0, 1]
+            out6[i, 2] = R_rel[i, 0, 2]
+            out6[i, 3] = R_rel[i, 1, 0]
+            out6[i, 4] = R_rel[i, 1, 1]
+            out6[i, 5] = R_rel[i, 1, 2]
+        return out6
+
+
 __all__ = [
+    "compute_delta_from_state_and_abs_rot",
     "euler_to_matrix_zyx_6d_nb",
     "euler_to_matrix_zyx_batch_nb",
     "matrix_to_euler_zyx_batch_nb",

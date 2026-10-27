@@ -54,7 +54,7 @@ class DistributedLogger:
 
         self._logger = logger
 
-    # Thin pass-throughs - callers use standard logging verbs.
+    # Thin pass-throughs — callers use standard logging verbs.
     def info(self, msg, *args, **kwargs):
         self._logger.info(msg, *args, **kwargs)
 

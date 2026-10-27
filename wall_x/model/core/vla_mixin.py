@@ -1,24 +1,45 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint as cp
-from peft import LoraConfig, get_peft_model
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
 from torch.distributed.fsdp import MixedPrecision as MP
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+
+from peft import LoraConfig, get_peft_model
+
 from transformers import GenerationMixin
 from transformers.utils import logging
 
-from wall_x.model.core.action.moe import SparseMoeBlock, TokenTypeRouter
-from wall_x.model.core.action.processor import ActionProcessor
-from wall_x.model.core.attention.mask import (
-    update_joint_attention_flash_mask,
-    update_joint_attention_mask_2d,
-    update_position_ids,
-)
 from wall_x.utils.constant import is_action_dataset_name
 
+from wall_x.model.core.action.processor import ActionProcessor
+from wall_x.model.core.action.moe import (
+    TokenTypeRouter,
+    SparseMoeBlock,
+)
+from wall_x.model.core.action.layout import TwoExpertLayout, prepare_two_expert_layout
+from wall_x.model.core.ops.attention_mask import (
+    update_position_ids,
+    update_position_ids_packed,
+    update_joint_attention_mask_2d,
+    update_joint_attention_mask_2d_packed,
+    update_joint_attention_flash_mask,
+    update_joint_attention_flash_mask_packed,
+    pack_block_bounds,
+)
+
 logger = logging.get_logger(__name__)
+
+
+def _adarms_horizon(config, cond):
+    if isinstance(cond, torch.Tensor) and cond.dim() == 3:
+        return cond.shape[1]
+    return config.action_horizon_flow
 
 
 class ActionModelMixMin:
@@ -45,10 +66,23 @@ class ActionModelMixMin:
                 "ActionModelMixMin.set_normalizer is called but action_preprocessor is not set"
             )
 
-    def _apply_mlp_moe(self, hidden_states, token_types, start_indices, end_indices):
+    def _apply_mlp_moe(
+        self,
+        hidden_states,
+        token_types,
+        action_starts=None,
+        action_ends=None,
+        expert_segments=None,
+        two_expert_layout: TwoExpertLayout = None,
+    ):
         if self.config.mlp_moe:
             hidden_states = self.moe(
-                hidden_states, token_types, start_indices, end_indices
+                hidden_states,
+                token_types,
+                action_starts,
+                action_ends,
+                expert_segments,
+                two_expert_layout,
             )
         else:
             hidden_states = self.mlp(hidden_states)
@@ -61,8 +95,10 @@ class ActionModelMixMin:
         adarms_conds,
         norms,  # list of norm layers (expert-wise)
         norm,  # shared norm if not norm_moe
-        start_indices=None,
-        end_indices=None,
+        action_starts=None,
+        action_ends=None,
+        expert_segments=None,
+        two_expert_layout: TwoExpertLayout = None,
         use_selective_recompute=False,
     ):
         """
@@ -81,14 +117,24 @@ class ActionModelMixMin:
         if self.config.norm_moe:
 
             # ---------------------------------------------------------
-            # Case 1A: mot_opt=True (segments assigned by start/end)
+            # Case 1A: mot_opt=True (segments assigned by fixed LLM/action layout)
             # ---------------------------------------------------------
             if self.config.mot_opt:
                 new_hidden_states = torch.zeros_like(hidden_states)
+                batch_size, seq_length = token_types.shape
+                if two_expert_layout is None:
+                    two_expert_layout = prepare_two_expert_layout(
+                        token_types,
+                        batch_size=batch_size,
+                        seq_length=seq_length,
+                        action_starts=action_starts,
+                        action_ends=action_ends,
+                        device=hidden_states.device,
+                    )
+                expert_segments = two_expert_layout.expert_segments
 
                 for expert_idx, expert_norm in enumerate(norms):
-                    start = start_indices[expert_idx]
-                    end = end_indices[expert_idx]
+                    start, end = expert_segments[expert_idx]
                     if start == end:
                         continue
 
@@ -97,9 +143,12 @@ class ActionModelMixMin:
 
                     # ====== reshape if adarms on flow expert ======
                     if self.config.use_adarms and expert_idx == 1:
+                        action_horizon = _adarms_horizon(
+                            self.config, adarms_conds[expert_idx]
+                        )
                         selected = selected.view(
                             -1,
-                            self.config.action_horizon_flow,
+                            action_horizon,
                             selected.shape[-1],
                         )
                         input_slice = selected[:, :, :dim_input]
@@ -160,10 +209,13 @@ class ActionModelMixMin:
                     selected = hidden_states[mask]  # [K, D]
 
                     if self.config.use_adarms and expert_idx == 1:
+                        action_horizon = _adarms_horizon(
+                            self.config, adarms_conds[expert_idx]
+                        )
                         gate_mask = mask
                         selected = selected.view(
                             -1,
-                            self.config.action_horizon_flow,
+                            action_horizon,
                             selected.shape[-1],
                         )
                         input_slice = selected[:, :, :dim_input]
@@ -231,7 +283,17 @@ class ActionModelMixMin:
 
         return hidden_states, gate, gate_mask
 
-    def _gated_residual(self, x, y, gate, start_indices=None, end_indices=None):
+    def _gated_residual(
+        self,
+        x,
+        y,
+        gate,
+        token_types=None,
+        action_starts=None,
+        action_ends=None,
+        expert_segments=None,
+        two_expert_layout: TwoExpertLayout = None,
+    ):
         """
         Applies gated residual connection with optional gate parameter.
 
@@ -251,14 +313,47 @@ class ActionModelMixMin:
             return x + y
 
         new_y = y.clone()
-        selected_y = y[start_indices[1] : end_indices[1]]
-        selected_y = selected_y.view(
-            -1, self.config.action_horizon_flow, selected_y.shape[-1]
-        )[:, :, : self.config.dim_inputs[1]]
-        selected_y = selected_y.to(torch.float32) * gate
-        new_y[start_indices[1] : end_indices[1], : self.config.dim_inputs[1]] = (
-            selected_y.view(-1, self.config.dim_inputs[1]).to(new_y.dtype)
+        if self.config.mot_opt:
+            if two_expert_layout is None:
+                if token_types is None:
+                    raise ValueError(
+                        "token_types or two_expert_layout must be provided for "
+                        "mot_opt gated residual"
+                    )
+                batch_size, seq_length = token_types.shape
+                two_expert_layout = prepare_two_expert_layout(
+                    token_types,
+                    batch_size=batch_size,
+                    seq_length=seq_length,
+                    action_starts=action_starts,
+                    action_ends=action_ends,
+                    device=y.device,
+                )
+            _, action_segment = two_expert_layout.expert_segments
+            start, end = action_segment
+            selected_y = y[start:end]
+        else:
+            if token_types is None:
+                raise ValueError("token_types must be provided for gated residual")
+            action_mask = token_types == 1
+            selected_y = y[action_mask]
+
+        # ours (align_cw): dynamic action horizon — use gate's horizon dim when the
+        # gate is 3-D with horizon>1, else fall back to the static action_horizon_flow.
+        action_horizon = (
+            gate.shape[1]
+            if isinstance(gate, torch.Tensor) and gate.dim() == 3 and gate.shape[1] > 1
+            else self.config.action_horizon_flow
         )
+        selected_y = selected_y.view(-1, action_horizon, selected_y.shape[-1])[
+            :, :, : self.config.dim_inputs[1]
+        ]
+        selected_y = selected_y.to(torch.float32) * gate
+        selected_y = selected_y.view(-1, self.config.dim_inputs[1]).to(new_y.dtype)
+        if self.config.mot_opt:
+            new_y[start:end, : self.config.dim_inputs[1]] = selected_y
+        else:
+            new_y[action_mask, : self.config.dim_inputs[1]] = selected_y
 
         return x + new_y
 
@@ -326,12 +421,31 @@ class ActionModelMixMin:
         return inputs_embeds, flow, adarms_cond
 
     @staticmethod
-    def _update_position_ids(position_ids, moe_token_types, positional_masks):
+    def _update_position_ids(
+        position_ids, moe_token_types, positional_masks, pack_seq_lens=None
+    ):
+        if pack_seq_lens is not None:
+            return update_position_ids_packed(
+                position_ids, moe_token_types, positional_masks, pack_seq_lens
+            )
         return update_position_ids(position_ids, moe_token_types, positional_masks)
 
     def _update_joint_attention_mask_2d(
-        self, attention_mask, moe_token_types, positional_masks
+        self, attention_mask, moe_token_types, positional_masks, pack_seq_lens=None
     ):
+        if pack_seq_lens is not None:
+            reference = moe_token_types if moe_token_types is not None else attention_mask
+            starts, ends = pack_block_bounds(
+                pack_seq_lens, reference.shape[1], reference.device
+            )
+            return update_joint_attention_mask_2d_packed(
+                attention_mask,
+                moe_token_types,
+                positional_masks,
+                starts,
+                ends,
+                causal_action_attention_mask=self.config.causal_action_attention_mask,
+            )
         return update_joint_attention_mask_2d(
             attention_mask,
             moe_token_types,
@@ -340,19 +454,50 @@ class ActionModelMixMin:
         )
 
     def _update_joint_attention_flash_mask(
-        self, attention_mask, moe_token_types, positional_masks, debug=False
+        self,
+        attention_mask,
+        moe_token_types,
+        positional_masks,
+        debug=False,
+        batch_size=None,
+        seq_len=None,
+        device=None,
+        pack_seq_lens=None,
     ):
+        if pack_seq_lens is not None:
+            starts, ends = pack_block_bounds(pack_seq_lens, seq_len, device)
+            return update_joint_attention_flash_mask_packed(
+                attention_mask,
+                moe_token_types,
+                positional_masks,
+                starts,
+                ends,
+                causal_action_attention_mask=self.config.causal_action_attention_mask,
+                debug=debug,
+                batch_size=batch_size,
+                seq_len=seq_len,
+                device=device,
+            )
         return update_joint_attention_flash_mask(
             attention_mask,
             moe_token_types,
             positional_masks,
             causal_action_attention_mask=self.config.causal_action_attention_mask,
             debug=debug,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            device=device,
         )
 
 
 class ActionGenerationMixin(GenerationMixin):
     action_preprocessor: ActionProcessor
+
+    def should_compute_ar_loss(self, labels) -> bool:
+        """Return whether this batch should materialize AR logits and CE loss."""
+        return labels is not None and float(
+            getattr(self.config, "ar_loss_weight", 1.0)
+        ) != 0.0
 
     def to_bfloat16_for_selected_params(self, fsdp_plugin=None, accelerator=None):
         """
@@ -401,11 +546,11 @@ class ActionGenerationMixin(GenerationMixin):
                 cast_root_forward_inputs=False,
             )
 
-            from wall_x.model.qact.qwen2_5.modeling_qwen2_5_vl import (
-                Qwen2_5_VLVisionBlock,
-            )
             from wall_x.model.qact.qwen2_5.modeling_qwen2_5_vl_act import (
                 Qwen2_5_VLDecoderLayer_with_MoE,
+            )
+            from wall_x.model.qact.qwen2_5.modeling_qwen2_5_vl import (
+                Qwen2_5_VLVisionBlock,
             )
 
             target_classes = (
@@ -413,7 +558,7 @@ class ActionGenerationMixin(GenerationMixin):
                 Qwen2_5_VLVisionBlock,
             )
 
-            # Step 1: Find top-level ActionProcessor modules and wrap them separately with FSDP (FP32)
+            # Step 1️⃣: Find top-level ActionProcessor modules and wrap them separately with FSDP (FP32)
             for name, module in list(self.named_modules()):
                 if isinstance(module, nn.Module) and any(
                     k in name.lower()
@@ -421,6 +566,7 @@ class ActionGenerationMixin(GenerationMixin):
                         "input_layernorm",
                         "post_attention_layernorm",
                         "model.norm",
+                        "pos_embed",
                         "action_preprocessor",
                     ]
                 ):
@@ -461,7 +607,7 @@ class ActionGenerationMixin(GenerationMixin):
                     _assign_child(self, name, wrapped)
                     setattr(wrapped, "_fsdp_wrapped", True)
 
-            # Step 2: Wrap the outer module with FSDP using the BF16 policy
+            # Step 2️⃣: Wrap the outer module with FSDP using the BF16 policy
             logger.info("[FSDP v1] wrapping root model with bf16 mixed precision...")
             self = FSDP(
                 self,
@@ -485,6 +631,7 @@ class ActionGenerationMixin(GenerationMixin):
                         "input_layernorm",
                         "post_attention_layernorm",
                         "model.norm",
+                        "pos_embed",
                         "action_preprocessor",
                         "action_processor",
                     ]
@@ -549,6 +696,9 @@ class ActionGenerationMixin(GenerationMixin):
         flow_loss_mask=None,
         _lm_loss_mask=None,
         action_hidden_states=None,
+        ar_action_loss_weight=None,
+        packing_active=False,
+        packing_dummy_active=False,
         **kwargs,
     ):
         if input_ids is not None:
@@ -557,7 +707,27 @@ class ActionGenerationMixin(GenerationMixin):
         loss = 0
         cross_entropy_loss, flow_loss = None, None
 
-        if dataset_names is not None:
+        if packing_active and ar_action_loss_weight is not None:
+            raise ValueError(
+                "Packed training does not support ar_action_loss_weight yet"
+            )
+        if ar_action_loss_weight is not None:
+            ar_action_loss_weight = float(ar_action_loss_weight)
+            if not math.isfinite(ar_action_loss_weight) or ar_action_loss_weight < 0.0:
+                raise ValueError(
+                    "ar_action_loss_weight must be a finite non-negative number"
+                )
+            if dataset_names is None:
+                raise ValueError(
+                    "dataset_names is required when ar_action_loss_weight is configured"
+                )
+            if len(dataset_names) != batch_size:
+                raise ValueError(
+                    "dataset_names length must match the batch size when AR action "
+                    "loss weight is configured"
+                )
+
+        if dataset_names is not None and not packing_active:
             unique_datasets_name = list(set(dataset_names))
             _device = hidden_states.device
             _flow_channel_names = [
@@ -576,11 +746,11 @@ class ActionGenerationMixin(GenerationMixin):
         else:
             unique_datasets_name, channel_loss_dict, channel_loss_count_dict = (
                 None,
-                None,
-                None,
+                {} if packing_active else None,
+                {} if packing_active else None,
             )
 
-        if labels is not None:
+        if self.should_compute_ar_loss(labels):
             if _lm_loss_mask is not None:
                 # ===== Optimized path: logits already gathered for loss tokens only =====
                 # logits: [N_loss, V] or None, _lm_loss_mask: [B, S-1]
@@ -591,16 +761,30 @@ class ActionGenerationMixin(GenerationMixin):
                     shift_labels_flat = shift_labels_flat.to(shift_logits.device)
 
                     _cross_entropy_loss = self.loss_fct(shift_logits, shift_labels_flat)
-                    cross_entropy_loss = _cross_entropy_loss.mean()
+
+                    batch_idx = (
+                        torch.arange(batch_size, device=_lm_loss_mask.device)
+                        .unsqueeze(1)
+                        .expand_as(_lm_loss_mask)
+                    )
+                    loss_batch_idx = batch_idx[_lm_loss_mask]  # [N_loss]
+                    if ar_action_loss_weight is None or ar_action_loss_weight == 1.0:
+                        cross_entropy_loss = _cross_entropy_loss.mean()
+                    else:
+                        action_sample_mask = torch.tensor(
+                            [is_action_dataset_name(name) for name in dataset_names],
+                            device=_lm_loss_mask.device,
+                            dtype=torch.bool,
+                        )
+                        token_weights = torch.where(
+                            action_sample_mask[loss_batch_idx],
+                            ar_action_loss_weight,
+                            1.0,
+                        ).to(device=shift_logits.device, dtype=_cross_entropy_loss.dtype)
+                        cross_entropy_loss = (_cross_entropy_loss * token_weights).mean()
 
                     # compute channel loss
                     if unique_datasets_name is not None:
-                        batch_idx = (
-                            torch.arange(batch_size, device=_lm_loss_mask.device)
-                            .unsqueeze(1)
-                            .expand_as(_lm_loss_mask)
-                        )
-                        loss_batch_idx = batch_idx[_lm_loss_mask]  # [N_loss]
                         for dataset_name_i in unique_datasets_name:
                             ds_mask = torch.tensor(
                                 [name == dataset_name_i for name in dataset_names],
@@ -626,11 +810,27 @@ class ActionGenerationMixin(GenerationMixin):
                 shift_labels = shift_labels.to(shift_logits.device)
                 non_ignored_mask = shift_labels != -100
                 _cross_entropy_loss = self.loss_fct(shift_logits, shift_labels)
-                cross_entropy_loss = (
-                    _cross_entropy_loss[non_ignored_mask].mean()
-                    if non_ignored_mask.any()
-                    else torch.tensor(0.0, device=shift_logits.device)
-                )
+                if non_ignored_mask.any():
+                    valid_ce = _cross_entropy_loss[non_ignored_mask]
+                    if ar_action_loss_weight is None or ar_action_loss_weight == 1.0:
+                        cross_entropy_loss = valid_ce.mean()
+                    else:
+                        action_sample_mask = torch.tensor(
+                            [is_action_dataset_name(name) for name in dataset_names],
+                            device=shift_logits.device,
+                            dtype=torch.bool,
+                        )
+                        token_is_action = action_sample_mask.unsqueeze(1).expand(
+                            batch_size, seq_length - 1
+                        ).reshape(-1)[non_ignored_mask]
+                        token_weights = torch.where(
+                            token_is_action,
+                            ar_action_loss_weight,
+                            1.0,
+                        ).to(dtype=valid_ce.dtype)
+                        cross_entropy_loss = (valid_ce * token_weights).mean()
+                else:
+                    cross_entropy_loss = torch.tensor(0.0, device=shift_logits.device)
 
                 # compute channel loss
                 _cross_entropy_loss = _cross_entropy_loss.view(
@@ -657,7 +857,7 @@ class ActionGenerationMixin(GenerationMixin):
                 with torch.no_grad():
                     cross_entropy_loss.detach()
 
-            # compute action token accuracy(computed uniformly through tokenizer_mixin)
+            # compute action token accuracy（computed uniformly through tokenizer_mixin）
             # if self.tokenizer_mixin is not None and self.action_mapper is not None:
             #     accuracy_dict = self.tokenizer_mixin.compute_accuracy(
             #         logits, labels, self.action_mapper, self.action_token_id_set
@@ -666,7 +866,7 @@ class ActionGenerationMixin(GenerationMixin):
 
         if action_chunk is not None:
             action_mask = input_ids == self.action_token_id_set["action_token_id"]
-            if action_mask.any():
+            if action_mask.any() or packing_dummy_active:
                 if action_hidden_states is None:
                     action_hidden_states = hidden_states[action_mask].to(torch.float32)
                 else:
@@ -696,7 +896,11 @@ class ActionGenerationMixin(GenerationMixin):
                             else flow_mask_expanded
                         )
                     if valid_mask is not None and not valid_mask.all():
-                        flow_loss = _flow_loss.sum() / valid_mask.sum()
+                        valid_count = valid_mask.sum()
+                        if valid_count.item() == 0:
+                            flow_loss = _flow_loss.sum() * 0.0
+                        else:
+                            flow_loss = _flow_loss.sum() / valid_count
                     else:
                         flow_loss = _flow_loss.mean()
                     loss += flow_loss
