@@ -157,7 +157,7 @@ class RecomputeConfig:
 
     ``enable: true`` puts the model in recompute-by-default (memory-minimal);
     model-specific subclasses add the exception sections that buy time back
-    with memory (see MEM_CKPT_TUNING.md for the ms/GB price table). Each
+    with memory, measured as ms saved per GB spent. Each
     model family maintains its own subclass; the loader picks it via
     ``RECOMPUTE_CONFIG_BY_MODEL_TYPE``. Unknown yaml keys are rejected
     loudly: a typo here silently changing the memory plan is exactly the

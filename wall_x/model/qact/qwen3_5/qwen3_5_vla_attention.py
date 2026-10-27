@@ -789,7 +789,7 @@ class Qwen3_5_VLA_GatedDeltaNet(nn.Module):
         a = self.in_proj_a(hidden_states)
 
         # MoT: replace action token projections with action-specific projections
-        # To Starrick: 待优化
+        # TODO: optimize
         output_action = None
         if action_embeds is not None and action_mask is not None:
             if action_layout is not None:

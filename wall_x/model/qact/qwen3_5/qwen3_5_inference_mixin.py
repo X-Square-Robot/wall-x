@@ -602,7 +602,7 @@ class Qwen3_5VLAInferenceMixin:
         #                     bidirectional (matches the native decode mask),
         #   rtc_pinned     -> pinned action queries lose visibility of suffix
         #                     action keys (the RTC isolation),
-        #   rtc_rope_gap=0 -> RoPE positions unchanged (TR-038 / native).
+        #   rtc_rope_gap=0 -> RoPE positions unchanged (native).
         # See wall_x/model/core/ops/attention_mask.py::
         # _apply_multisample_flow_blocks_2d, applied through the joint 2D mask.
         positional_masks = None

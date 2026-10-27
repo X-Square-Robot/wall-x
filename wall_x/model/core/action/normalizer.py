@@ -194,7 +194,7 @@ class Normalizer(nn.Module):
         ``min_by_key`` / ``delta_by_key`` are ``{dataset_name: 1-D array/tensor}``
         with matching keys. Used by :func:`create_normalizers_from_v2_stats` so
         the model-side normalizer carries the exact statistics the
-        internal_dataset_backend_v2 pipeline used.
+        v2 data pipeline used.
         """
         instance = cls.__new__(cls)
         nn.Module.__init__(instance)

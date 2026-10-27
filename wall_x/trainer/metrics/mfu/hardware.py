@@ -42,8 +42,8 @@ MEM_BW_GBS = {
     "GB200": 8000,
 }
 
-# Fallback when the device name matches nothing: A800 numbers (the fleet
-# default), same behavior as the previous in-adapter table.
+# Fallback when the device name matches nothing: A800 numbers, same
+# behavior as the previous in-adapter table.
 _DEFAULT_PEAK_TFLOPS = 312
 _DEFAULT_MEM_BW_GBS = 2039
 

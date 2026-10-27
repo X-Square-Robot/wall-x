@@ -150,7 +150,7 @@ class QwenVLActInferAdapter(BaseInferAdapter):
         )
 
         # 4) normalizers, including norm_key fallback.
-        # Built before load_wallx_processors: OSS wall-x (refactor_2604) requires
+        # Built before load_wallx_processors: current wall-x requires
         # an explicit normalizer for the action tokenizer; older builds accept it
         # via the same kwarg.
         normalizer_action, normalizer_propri, resolved_norm_key = build_normalizers(

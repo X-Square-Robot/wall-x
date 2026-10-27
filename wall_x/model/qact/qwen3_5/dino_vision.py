@@ -271,7 +271,7 @@ class DinoFusedRopeAttention(_dinov3.DINOv3ViTAttention):
             # dmuon installs bf16 compute copies for the dedicated bias params
             # but never touches buffers, so the zero k segment must follow the
             # LIVE dtype of its siblings or torch.cat type-promotes the fused
-            # bias to fp32 and the addmm dtype-mismatches (seen on DLC).
+            # bias to fp32 and the addmm dtype-mismatches.
             ref = next(
                 b for b in (self.q_bias, self.k_bias, self.v_bias) if b is not None
             )

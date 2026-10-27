@@ -376,7 +376,7 @@ class Qwen3_5VLADecoderLayer(GradientCheckpointingLayer):
     ) -> torch.FloatTensor:
         # Attention section (input LN -> token mixer -> residual + gated
         # residual) optionally recomputes on its own while the MLP keeps its
-        # activations: the ckpt cost/benefit table (MEM_CKPT_TUNING.md) shows
+        # activations: measured recompute cost/benefit shows
         # the GDN attention half is a poor memory-for-time trade (~3 ms/GB)
         # while its MLP half is good (~5.5) -- this mode buys the good half
         # without paying for the bad one. Selected per layer by the

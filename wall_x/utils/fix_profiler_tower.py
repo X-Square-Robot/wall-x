@@ -19,7 +19,7 @@ Usage (before creating torch.profiler.profile, e.g. at trainer startup):
     import fix_profiler_tower
     fix_profiler_tower.apply_patch()
 
-Validated on torch 2.13.0+cu130 / python 3.12.13 (H100 dev box, 2026-08-05):
+Validated on torch 2.13.0+cu130 / python 3.12.13 (H100, 2026-08-05):
   custom-op-in-autograd.Function workload, 300 iters, with_stack=True:
     before patch: 300/300 apply C frames clamped to trace end (tower)
     after  patch:   0/300 leaked; apply median dur 50us; outputs bit-identical.

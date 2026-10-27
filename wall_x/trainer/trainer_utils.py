@@ -435,7 +435,7 @@ def seed_all(seed, deterministic_algorithms: bool = False):
         # perf 套餐：cudnn 自由选最快 algo（含 nondet variant），但 benchmark 不默认开：
         # benchmark=True 对每个新 conv 配置做一轮算法竞速，动态 shape 负载（如 Qwen3.5
         # vision Conv3d patch_embed）几乎每步撞新 shape、反复付竞速成本，step time 3.2x
-        # 回退（TR-017 实测 MFU 37.7%→11.7%）。固定 shape 负载（如 LIBERO 224
+        # 回退（实测 MFU 37.7%→11.7%）。固定 shape 负载（如 LIBERO 224
         # 输入）warm-up 一次后收益为正——已实测过收益的固定 shape 场景可用
         # WALLX_CUDNN_BENCHMARK=1 显式开启，不走全局默认。
         torch.backends.cudnn.deterministic = False

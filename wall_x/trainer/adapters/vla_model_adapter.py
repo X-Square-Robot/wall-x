@@ -1127,9 +1127,9 @@ class VLAdapter(ModelAdapter):
         ("H200", 989.0),
         ("H800", 989.0),
         ("H100", 989.0),
-        # "NVIDIA L20Z" is Lingjun's console label for an H100-class Hopper
-        # part (measured on dev12: dense bf16 matmul sustains H100-level
-        # TFLOPS, HBM ~3.3 TB/s). NOT the Ada "NVIDIA L20" (~119 TFLOPS
+        # "NVIDIA L20Z" is a cloud console label for an H100-class Hopper
+        # part (measured: dense bf16 matmul sustains H100-level TFLOPS,
+        # HBM ~3.3 TB/s). NOT the Ada "NVIDIA L20" (~119 TFLOPS
         # bf16), which does not contain this substring and deliberately
         # falls through to the loud-unknown path.
         ("L20Z", 989.0),
