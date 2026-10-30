@@ -524,9 +524,13 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
+        max_seqlen: Optional[int] = None,
         rotary_pos_emb: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
+        # max_seqlen is accepted for API parity with FlashAttention vision
+        # blocks; SDPA builds the mask from cu_seqlens and does not use it.
+        del max_seqlen
         seq_length = hidden_states.shape[0]
         q, k, v = (
             self.qkv(hidden_states)

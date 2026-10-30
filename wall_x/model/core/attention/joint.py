@@ -439,11 +439,15 @@ class JointQwen2VLAttention(nn.Module):
         self, query_states, key_states, cos, sin, unsqueeze_dim=1
     ):
         del unsqueeze_dim
+        # Qwen2.5-VL rotary_emb already returns (3, B, S, head_dim // 2).
+        # Do not half-slice again: that makes PyTorch MRoPE fallback split
+        # [16,24,24,16,24,24] against dim 64, and also breaks the CUDA kernel
+        # assert cos.size(-1) == head_dim // 2.
         query_states, key_states = m_rope(
             query_states.contiguous(),
             key_states.contiguous(),
-            cos[..., : (cos.size(3) // 2)].contiguous().float(),
-            sin[..., : (sin.size(3) // 2)].contiguous().float(),
+            cos.contiguous().float(),
+            sin.contiguous().float(),
             self.rope_scaling["mrope_section"],
         )
         return query_states, key_states

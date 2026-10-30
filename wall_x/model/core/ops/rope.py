@@ -96,8 +96,8 @@ class MRoPEOp(OpsProxy):
     Signature: m_rope(query_states, key_states, cos, sin, mrope_section, interleaved=False) -> (q_embed, k_embed)
 
     cos/sin shape: (3, B, S, D//2). mrope_section like [16, 24, 24] specifies
-    how many head dims each of T/H/W occupies. After split by mrope_section * 2,
-    uses i % 3 to select from corresponding temporal/height/width rows.
+    how many half-dims each of T/H/W occupies. Split by mrope_section, select
+    with i % 3, then repeat to full head_dim for rotate_half.
     """
 
     @property
@@ -125,23 +125,22 @@ class MRoPEOp(OpsProxy):
         interleaved=False,
         **kwargs,
     ):
+        # Match HF apply_multimodal_rotary_pos_emb and CUDA MRope:
+        # cos/sin are (3, B, S, head_dim // 2); section-select first, then
+        # repeat to full head_dim for rotate_half.
+        del interleaved
         cos = cos.float()
         sin = sin.float()
-        # Double cos/sin along last dim (matching external_accel kernel's internal behavior)
-        cos = torch.cat((cos, cos), dim=-1)
-        sin = torch.cat((sin, sin), dim=-1)
-        # List concatenation: [16,24,24] -> [16,24,24,16,24,24] (NOT element-wise multiply)
-        mrope_section_doubled = mrope_section + mrope_section
-        cos_split = torch.cat(
-            [m[i % 3] for i, m in enumerate(cos.split(mrope_section_doubled, dim=-1))],
+        cos = torch.cat(
+            [m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))],
             dim=-1,
-        ).unsqueeze(
-            2
-        )  # (B, S, 1, D)
-        sin_split = torch.cat(
-            [m[i % 3] for i, m in enumerate(sin.split(mrope_section_doubled, dim=-1))],
+        )
+        sin = torch.cat(
+            [m[i % 3] for i, m in enumerate(sin.split(mrope_section, dim=-1))],
             dim=-1,
-        ).unsqueeze(2)
+        )
+        cos_split = torch.cat((cos, cos), dim=-1).unsqueeze(2)  # (B, S, 1, D)
+        sin_split = torch.cat((sin, sin), dim=-1).unsqueeze(2)
         q_embed = (query_states.float() * cos_split) + (
             _rotate_half(query_states.float()) * sin_split
         )
