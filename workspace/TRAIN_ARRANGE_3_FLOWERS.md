@@ -1,65 +1,65 @@
-# 插花任务（arrange_3_flowers）训练指南
+# Flower-arrangement task (arrange_3_flowers) training guide
 
-本文档描述在已有 **LeRobot v3 格式数据集** 上，基于 **Wall-OSS-0.5** 预训练权重进行双臂插花任务微调的流程。
+This guide fine-tunes **Wall-OSS-0.5** pretrained weights on an existing **LeRobot v3** dataset for a dual-arm flower-arrangement task.
 
-任务：双臂机器人 **三花插花**，flow 动作预测，推理指令示例：`arrange flower`。
-
----
-
-## 1. 任务与动作空间
-
-### 1.1 机器人与相机
-
-| 项目 | 配置 |
-|------|------|
-| 机器人类型 | 双臂（ex001） |
-| 相机键名 | `observation.images.faceImg`、`leftImg`、`rightImg` |
-| 训练分辨率 | 448×448（三视角） |
-| 建议帧率 | 20 fps |
-
-### 1.2 动作维度（26 维，对齐 Wall-OSS-0.5）
-
-训练**只预测双臂**，底盘/升降/头部不预测，用 `action_padding` 补齐到 26 维：
-
-| 分量 | 维度 | 说明 |
-|------|------|------|
-| 左臂相对位姿 + 夹爪 | 3 + 6 + 1 = 10 | `follow_left_ee_*_relative` + gripper |
-| 右臂相对位姿 + 夹爪 | 3 + 6 + 1 = 10 | `follow_right_ee_*_relative` + gripper |
-| **有效动作合计** | **20** | loader 从数据集向量中取前 20 维 |
-| `action_padding` | 6 | 虚拟填充，loss 不反传 |
-| **模型输入合计** | **26** | 与 Wall-OSS-0.5 预训练空间一致 |
-
-> 若 LeRobot 数据集中 `action` / `observation.state` 为 **26 维**（含额外 DOF），训练配置通过 `dof_config` + loader 截断，只使用前 20 维有效双臂数据。
-
-示例训练配置位于 `workspace/example/`（复制后按实际路径修改）。
+Task: a dual-arm robot **arranges three flowers**, with flow action prediction. Example inference instruction: `arrange flower`.
 
 ---
 
-## 2. 前置准备
+## 1. Task and action space
 
-### 2.1 环境
+### 1.1 Robot and cameras
 
-参考 `workspace/rtx5090/DEPLOY.md` 或官方 README，需安装：
+| Item | Setting |
+|------|---------|
+| Robot type | Dual arm (ex001) |
+| Camera keys | `observation.images.faceImg`, `leftImg`, `rightImg` |
+| Training resolution | 448×448 (three views) |
+| Suggested frame rate | 20 fps |
+
+### 1.2 Action dimensions (26-D, aligned with Wall-OSS-0.5)
+
+Training **predicts the arms only**. Base, lift, and head are not predicted. `action_padding` fills the vector out to 26 dimensions:
+
+| Component | Dims | Notes |
+|-----------|------|-------|
+| Left-arm relative pose + gripper | 3 + 6 + 1 = 10 | `follow_left_ee_*_relative` + gripper |
+| Right-arm relative pose + gripper | 3 + 6 + 1 = 10 | `follow_right_ee_*_relative` + gripper |
+| **Effective action total** | **20** | The loader keeps the first 20 dims of the dataset vector |
+| `action_padding` | 6 | Dummy padding; no gradient is propagated through it |
+| **Model input total** | **26** | Matches the Wall-OSS-0.5 pretraining space |
+
+> If `action` / `observation.state` in the LeRobot dataset is **26-D** (including extra DOFs), the training config truncates it through `dof_config` and the loader, and uses only the first 20 effective dual-arm dims.
+
+The example training config is under `workspace/example/` (copy it and edit the paths).
+
+---
+
+## 2. Prerequisites
+
+### 2.1 Environment
+
+See `workspace/rtx5090/DEPLOY.md` or the official README. You need:
 
 - Python 3.10 + wall-x + dmuon + **lerobot v0.4.4**
-- flash-attn（训练/推理 vision 模块需要）
-- CUDA 12.8 编译工具链（若需编译 wall-x 算子）
+- flash-attn (required by the vision module for training and inference)
+- A CUDA 12.8 toolchain (if you compile the wall-x operators)
 
-### 2.2 预训练权重
+### 2.2 Pretrained weights
 
-需提前下载到本地：
+Download these locally first:
 
-| 资源 | 用途 | 配置项 |
-|------|------|--------|
-| [wall-oss-0.5](https://huggingface.co/X-Square-Robot/wall-oss-0.5) | 微调起点 | `checkpoint.resume_from`、`model.config_path` |
-| [Qwen2.5-VL-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct) | Processor | `model.processor_path`、`model.pretrained_path` |
+| Resource | Use | Config field |
+|----------|-----|--------------|
+| [wall-oss-0.5](https://huggingface.co/X-Square-Robot/wall-oss-0.5) | Fine-tune starting point | `checkpoint.resume_from`, `model.config_path` |
+| [Qwen2.5-VL-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct) | Processor | `model.processor_path`, `model.pretrained_path` |
 
 ```bash
 huggingface-cli download X-Square-Robot/wall-oss-0.5 --local-dir /path/to/wall-oss-0.5
 huggingface-cli download Qwen/Qwen2.5-VL-3B-Instruct --local-dir /path/to/Qwen2.5-VL-3B-Instruct
 ```
 
-### 2.3 路径约定（按需修改）
+### 2.3 Path conventions (edit as needed)
 
 ```bash
 export REPO_ROOT=/path/to/wall-x
@@ -68,54 +68,54 @@ export MODEL_ROOT=/path/to/model
 export CKPT_ROOT=/path/to/ckpt
 ```
 
-| 路径 | 说明 |
-|------|------|
-| `${DATA_ROOT}/arrange_3_flowers_lerobot` | LeRobot v3 数据集根目录 |
-| `${DATA_ROOT}/arrange_3_flowers_norm_stats.json` | 归一化统计 |
-| `${CKPT_ROOT}/arrange_3_flowers` | 训练 checkpoint 输出 |
-| `${MODEL_ROOT}/wall-oss-0.5` | 预训练权重 |
+| Path | Description |
+|------|-------------|
+| `${DATA_ROOT}/arrange_3_flowers_lerobot` | LeRobot v3 dataset root |
+| `${DATA_ROOT}/arrange_3_flowers_norm_stats.json` | Normalization stats |
+| `${CKPT_ROOT}/arrange_3_flowers` | Training checkpoint output |
+| `${MODEL_ROOT}/wall-oss-0.5` | Pretrained weights |
 | `${MODEL_ROOT}/Qwen2.5-VL-3B-Instruct` | VLM processor |
 
 ---
 
-## 2.4 原始数据转换（x2robot → LeRobot v3）
+## 2.4 Convert raw data (x2robot → LeRobot v3)
 
-若数据为 x2robot 采集格式，先用仓库根目录的 `x2robot2lerobot.py` 转换：
+If the data is in the x2robot collection format, convert it first with `x2robot2lerobot.py` at the repository root:
 
 ```bash
 cd "${REPO_ROOT}"
 
-# 1. 复制并编辑转换配置（填入 src_path_list / output_path）
+# 1. Copy and edit the conversion config (fill in src_path_list / output_path)
 cp workspace/data_config/arrange_3_flowers_wrc_red_x2robot2lerobot.json /tmp/my_conversion.json
 
-# 2. 运行转换（需 lerobot==0.4.4）
+# 2. Run the conversion (requires lerobot==0.4.4)
 python x2robot2lerobot.py --config /tmp/my_conversion.json
 ```
 
-配置模板与说明见：
+Templates and notes:
 
 - `workspace/data_config/arrange_3_flowers_wrc_red_x2robot2lerobot.json`
-- `workspace/data_config/arrange_3_flowers_wrc_red.yml`（原始采集路径列表示例）
+- `workspace/data_config/arrange_3_flowers_wrc_red.yml` (example list of raw collection paths)
 
-转换输出目录即训练 YAML 中的 `data.lerobot_config.repo_id`。
+The conversion output directory is `data.lerobot_config.repo_id` in the training YAML.
 
 ---
 
-## 3. LeRobot 数据集要求
+## 3. LeRobot dataset requirements
 
-外部提供的训练数据应为 **LeRobot v3** 本地数据集，放置于 `data.lerobot_config.repo_id` 所指路径。
+Training data from outside this repo should be a local **LeRobot v3** dataset at the path in `data.lerobot_config.repo_id`.
 
-### 3.1 必需字段
+### 3.1 Required fields
 
-| 键 | 说明 |
-|----|------|
-| `observation.state` | 本体状态向量（float32） |
-| `action` | 动作向量（float32） |
-| `observation.images.faceImg` | 正面相机 |
-| `observation.images.leftImg` | 左腕相机 |
-| `observation.images.rightImg` | 右腕相机 |
+| Key | Description |
+|-----|-------------|
+| `observation.state` | Proprioceptive state vector (float32) |
+| `action` | Action vector (float32) |
+| `observation.images.faceImg` | Front camera |
+| `observation.images.leftImg` | Left-wrist camera |
+| `observation.images.rightImg` | Right-wrist camera |
 
-训练 YAML 中的 `key_mappings` 将上述键映射为 `face_view` / `left_wrist_view` / `right_wrist_view`：
+`key_mappings` in the training YAML maps those keys to `face_view` / `left_wrist_view` / `right_wrist_view`:
 
 ```yaml
 data:
@@ -128,39 +128,39 @@ data:
     action: action
 ```
 
-### 3.2 维度与内容
+### 3.2 Shape and content
 
-- `observation.state` / `action` 建议为 **26 维**；若含额外 DOF，训练时按 `dof_config` 自动截取前 20 维双臂分量
-- 相机原始分辨率不限，训练时统一 resize 到 448×448
-- 数据集需符合 LeRobot v3 目录结构（含 `meta/`、`data/` 等）
+- `observation.state` / `action` should be **26-D**. If extra DOFs are present, training keeps the first 20 dual-arm dims according to `dof_config`.
+- Camera resolution is unconstrained; training resizes every view to 448×448.
+- The dataset must follow the LeRobot v3 layout (`meta/`, `data/`, and so on).
 
-### 3.3 计算归一化统计
+### 3.3 Compute normalization stats
 
-在训练前必须生成 `norm_stats.json`：
+Generate `norm_stats.json` before training:
 
 ```bash
 cd "${REPO_ROOT}"
 
-# 复制 workspace/example/ 下插花示例配置为 my_flowers_train.yml 并改好路径后执行
+# Copy the flower-arrangement example under workspace/example/ to my_flowers_train.yml, edit the paths, then run:
 python scripts/compute_norm_stats.py \
   --train_config /path/to/my_flowers_train.yml \
   --data_root "${DATA_ROOT}/arrange_3_flowers_lerobot" \
   --output_path "${DATA_ROOT}/arrange_3_flowers_norm_stats.json"
 ```
 
-脚本会：
+The script:
 
-- 读取 YAML 中的 `dof_config` / `agent_pos_config` / `action_horizon`
-- 对 `_relative` 键做与训练 loader 一致的相对位姿统计
-- 输出 20 维有效 DOF 的 mean/std/q01/q99（state 与 action 各一份）
+- Reads `dof_config` / `agent_pos_config` / `action_horizon` from the YAML
+- Computes relative-pose stats for `_relative` keys the same way the training loader does
+- Writes mean/std/q01/q99 for the 20 effective DOFs (one set for state, one for action)
 
 ---
 
-## 4. 训练配置
+## 4. Training config
 
-复制 `workspace/example/` 下插花任务示例 YAML，修改路径后使用。
+Copy the flower-arrangement example YAML under `workspace/example/`, edit the paths, and use that copy.
 
-**必填路径示例：**
+**Required paths:**
 
 ```yaml
 model:
@@ -180,7 +180,7 @@ checkpoint:
   resume_from: ${MODEL_ROOT}/wall-oss-0.5/model.safetensors
 ```
 
-**任务 DOF 配置（核心，一般无需改动）：**
+**Task DOF config (the important part; usually leave it unchanged):**
 
 ```yaml
 task:
@@ -196,35 +196,35 @@ task:
   action_horizon_flow: 32
 ```
 
-### 4.1 关键超参（参考值）
+### 4.1 Key hyperparameters (reference values)
 
-| 类别 | 参数 | 值 |
-|------|------|-----|
-| 优化器 | AdamW, lr | 5e-5 |
-| 调度器 | cosine, warmup | 1000 steps |
-| 训练步数上限 | `num_training_steps` | 200000 |
-| 每卡 batch | `batch_size_per_gpu` | 4 |
-| 梯度累积 | `gradient_accumulation_steps` | 4 |
-| 有效 batch（4 卡） | 4 × 4 × 4 | **64** |
-| 动作 horizon | `action_horizon` / `action_horizon_flow` | 32 |
-| 混合精度 | bf16 + FSDP | 开启 |
-| 保存间隔 | `save_interval` | 每 2000 step |
+| Group | Parameter | Value |
+|-------|-----------|-------|
+| Optimizer | AdamW, lr | 5e-5 |
+| Scheduler | cosine, warmup | 1000 steps |
+| Max training steps | `num_training_steps` | 200000 |
+| Per-GPU batch | `batch_size_per_gpu` | 4 |
+| Gradient accumulation | `gradient_accumulation_steps` | 4 |
+| Effective batch (4 GPUs) | 4 × 4 × 4 | **64** |
+| Action horizon | `action_horizon` / `action_horizon_flow` | 32 |
+| Mixed precision | bf16 + FSDP | on |
+| Save interval | `save_interval` | every 2000 steps |
 | W&B | `log_project` / `log_name` | `wall_oss_flowers` / `arrange_3_flowers` |
 
-### 4.2 数据加载注意
+### 4.2 Data-loading notes
 
-- `data.num_workers: 0`：网络文件系统 + 多进程 DataLoader 可能触发 `Errno 95`，建议保持 0
+- `data.num_workers: 0`: a multiprocess DataLoader on a network filesystem can raise `Errno 95`. Keep this at 0.
 - `data.train_test_split: 0.95`
 - `data.max_length: 1024`
-- `data.resolution`：三视角均为 448
+- `data.resolution`: 448 for all three views
 
 ---
 
-## 5. 启动训练
+## 5. Launch training
 
-### 5.1 冒烟测试（推荐先做）
+### 5.1 Smoke test (do this first)
 
-复制示例配置并减小步数/分辨率，或使用启动脚本的 `DEBUG=1` 模式：
+Copy the example config and shorten the step count or resolution, or use `DEBUG=1` on the launch script:
 
 ```bash
 cd "${REPO_ROOT}"
@@ -240,9 +240,9 @@ DEBUG=1 CONFIG=/path/to/my_flowers_train.yml \
   bash workspace/example/run_oss_wandb_local.sh
 ```
 
-`DEBUG=1` 会自动生成临时配置（约 30 step、缩短 save 间隔）。
+`DEBUG=1` writes a temporary config (about 30 steps, with a shorter save interval).
 
-### 5.2 正式训练（单机多卡）
+### 5.2 Full training (single node, multiple GPUs)
 
 ```bash
 cd "${REPO_ROOT}"
@@ -254,19 +254,19 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
     --log_to_file
 ```
 
-### 5.3 集群启动脚本
+### 5.3 Cluster launch script
 
 ```bash
 CONFIG=/path/to/my_flowers_train.yml \
   bash workspace/example/run_oss_wandb_local.sh
 ```
 
-脚本特性：
+The script:
 
-- 自动检测 `NPROC_PER_NODE` / `WORLD_SIZE`（支持多机）
-- 可选 RDMA 库安装（`SKIP_RDMA_INSTALL=1` 跳过）
-- wandb 可通过 `WANDB_OFFLINE=1` 离线运行
-- 需设置 `CONDA_HOME`、`CONDA_ENV`、`CUDA_HOME`
+- Detects `NPROC_PER_NODE` / `WORLD_SIZE` (multi-node is supported)
+- Can optionally install the RDMA library (`SKIP_RDMA_INSTALL=1` skips it)
+- Runs wandb offline when `WANDB_OFFLINE=1`
+- Requires `CONDA_HOME`, `CONDA_ENV`, and `CUDA_HOME`
 
 ```bash
 export CONDA_HOME=/path/to/miniconda3
@@ -278,16 +278,16 @@ export WANDB_ENTITY=your_entity
 
 ---
 
-## 6. Checkpoint 与续训
+## 6. Checkpoints and resume
 
-### 6.1 输出目录结构
+### 6.1 Output layout
 
 ```
 ${CKPT_ROOT}/arrange_3_flowers/
 ├── 3_50000/
-│   ├── model.safetensors      # ~17GB 全量权重
+│   ├── model.safetensors      # ~17 GB full weights
 │   ├── config.json
-│   ├── config.yml             # 训练配置快照
+│   ├── config.yml             # snapshot of the training config
 │   ├── norm_stats.json
 │   ├── preprocessor_config.json
 │   └── tokenizer*.json
@@ -295,9 +295,9 @@ ${CKPT_ROOT}/arrange_3_flowers/
 └── ...
 ```
 
-### 6.2 FSDP 分片合并
+### 6.2 Merge FSDP shards
 
-若保存为 FSDP shard，推理前需合并：
+If the save is an FSDP shard, merge it before inference:
 
 ```bash
 python scripts/merge_sharded_weights.py \
@@ -305,7 +305,7 @@ python scripts/merge_sharded_weights.py \
   /path/to/merged_checkpoint
 ```
 
-### 6.3 从 checkpoint 续训
+### 6.3 Resume from a checkpoint
 
 ```yaml
 checkpoint:
@@ -314,9 +314,9 @@ checkpoint:
 
 ---
 
-## 7. 训练后验证
+## 7. Checks after training
 
-### 7.1 开环评估（可选）
+### 7.1 Open-loop evaluation (optional)
 
 ```bash
 bash scripts/run_serving.sh \
@@ -334,61 +334,61 @@ python scripts/draw_openloop_plot.py \
   --save-dir ./openloop_plots
 ```
 
-### 7.2 真机部署
+### 7.2 Real-robot deployment
 
-参考 `workspace/rtx5090/DEPLOY.md`，将 checkpoint 部署到推理机并启动 WebSocket 服务。
-
----
-
-## 8. 常见问题
-
-### Q1: `num_workers > 0` 报 Errno 95
-
-**处理**：保持 `data.num_workers: 0`。
-
-### Q2: norm stats 维度与训练不匹配
-
-**现象**：state/action 统计维度不是 20。
-
-**处理**：确认 `compute_norm_stats.py` 与训练使用同一份 YAML，且 `dof_config` 与示例一致。
-
-### Q3: 数据集 26 维但训练只要 20 维
-
-**说明**：预期行为。loader 按 `dof_config` 截取前 20 维双臂分量，`action_padding(6)` 在模型侧补齐到 26 维。
-
-### Q4: 显存不足
-
-- 减小 `batch_size_per_gpu` 或增大 `gradient_accumulation_steps`
-- 冒烟阶段可将 `resolution` 降至 256
-- 正式训练建议多卡 FSDP；单卡至少 **48GB** 显存（448 分辨率）
-
-### Q5: lerobot 版本不对
-
-固定使用 **v0.4.4** tag，`pip install --no-deps -e .` 安装。
+See `workspace/rtx5090/DEPLOY.md`. Copy the checkpoint to the inference machine and start the WebSocket service.
 
 ---
 
-## 9. 相关文件索引
+## 8. Troubleshooting
 
-| 文件 | 用途 |
-|------|------|
-| `workspace/example/` | 插花任务示例训练 / 冒烟 YAML |
-| `workspace/example/run_oss_wandb_local.sh` | 集群/本地训练启动脚本 |
-| `scripts/compute_norm_stats.py` | 归一化统计 |
-| `wall_x/trainer/fsdp_trainer/train_fsdp.py` | FSDP 训练入口 |
-| `scripts/merge_sharded_weights.py` | FSDP checkpoint 合并 |
-| `scripts/draw_openloop_plot.py` | 开环评估 |
-| `workspace/rtx5090/DEPLOY.md` | 推理机部署 |
+### Q1: `num_workers > 0` raises Errno 95
+
+**Fix:** Keep `data.num_workers: 0`.
+
+### Q2: Norm-stats rank does not match training
+
+**Symptom:** State or action stats are not 20-D.
+
+**Fix:** Run `compute_norm_stats.py` with the same YAML as training, and keep `dof_config` identical to the example.
+
+### Q3: The dataset is 26-D but training only wants 20-D
+
+**Explanation:** This is expected. The loader keeps the first 20 dual-arm dims according to `dof_config`, and `action_padding(6)` pads the model input back to 26-D.
+
+### Q4: Out of GPU memory
+
+- Lower `batch_size_per_gpu`, or raise `gradient_accumulation_steps`
+- For a smoke run, drop `resolution` to 256
+- Use multi-GPU FSDP for the full run. A single GPU needs at least **48 GB** at 448 resolution.
+
+### Q5: Wrong lerobot version
+
+Pin the **v0.4.4** tag and install with `pip install --no-deps -e .`.
 
 ---
 
-## 10. 最小检查清单
+## 9. Related files
 
-- [ ] wall-oss-0.5 与 Qwen2.5-VL-3B-Instruct 已下载
-- [ ] LeRobot v3 数据集已就位，键名与 `key_mappings` 一致
-- [ ] `norm_stats.json` 已生成（20 维 state/action）
-- [ ] 训练 YAML 中所有路径已替换为实际路径
-- [ ] 冒烟训练（smoke / `DEBUG=1`）通过
-- [ ] 正式训练启动，日志 / wandb 正常
-- [ ] checkpoint 含 `model.safetensors`（约 17GB）及 `config.yml`
-- [ ] 推理服务可加载 checkpoint 并返回动作
+| File | Purpose |
+|------|---------|
+| `workspace/example/` | Example training / smoke YAML for the flower-arrangement task |
+| `workspace/example/run_oss_wandb_local.sh` | Cluster or local training launcher |
+| `scripts/compute_norm_stats.py` | Normalization stats |
+| `wall_x/trainer/fsdp_trainer/train_fsdp.py` | FSDP training entry point |
+| `scripts/merge_sharded_weights.py` | Merge an FSDP checkpoint |
+| `scripts/draw_openloop_plot.py` | Open-loop evaluation |
+| `workspace/rtx5090/DEPLOY.md` | Inference-machine deployment |
+
+---
+
+## 10. Minimum checklist
+
+- [ ] wall-oss-0.5 and Qwen2.5-VL-3B-Instruct are downloaded
+- [ ] The LeRobot v3 dataset is in place, and its keys match `key_mappings`
+- [ ] `norm_stats.json` exists (20-D state and action)
+- [ ] Every path in the training YAML is a real path
+- [ ] The smoke run (smoke config or `DEBUG=1`) passed
+- [ ] Full training has started, and the logs / wandb look healthy
+- [ ] The checkpoint contains `model.safetensors` (about 17 GB) and `config.yml`
+- [ ] The inference service can load the checkpoint and return actions

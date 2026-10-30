@@ -12,28 +12,28 @@ This guide explains how to fine-tune, evaluate in simulation, and deploy on real
 
 ---
 
-## Task Guides（任务指南）
+## Task Guides
 
-端到端示例（LeRobot 数据 → 训练 → 推理部署）：
+End-to-end examples (LeRobot data → training → inference deployment):
 
-| 文档 | 用途 |
-|------|------|
-| [TRAIN_ARRANGE_3_FLOWERS.md](./TRAIN_ARRANGE_3_FLOWERS.md) | 插花训练示例 |
-| [rtx5090/DEPLOY.md](./rtx5090/DEPLOY.md) | **RTX 5090 推理部署（通用）**：环境安装、服务启动、排障与检查清单 |
-| [rtx5090/README.md](./rtx5090/README.md) | RTX 5090 快速开始：一键脚本与目录说明 |
+| Document | Purpose |
+|----------|---------|
+| [TRAIN_ARRANGE_3_FLOWERS.md](./TRAIN_ARRANGE_3_FLOWERS.md) | Flower-arrangement training example |
+| [rtx5090/DEPLOY.md](./rtx5090/DEPLOY.md) | **RTX 5090 inference deployment (general)**: environment setup, service launch, troubleshooting, and checklist |
+| [rtx5090/README.md](./rtx5090/README.md) | RTX 5090 quick start: helper scripts and directory layout |
 
-**快速入口（在仓库根目录执行）：**
+**Quick start (run from the repository root):**
 
 ```bash
-# 训练：复制 workspace/example/ 下插花 YAML，改路径后
+# Training: copy the flower-arrangement YAML under workspace/example/, then edit the paths
 torchrun --nproc_per_node=4 wall_x/trainer/fsdp_trainer/train_fsdp.py --config /path/to/my_flowers_train.yml
 
-# 推理：配置 workspace/rtx5090/local/env.sh 后
+# Inference: after configuring workspace/rtx5090/local/env.sh
 bash workspace/rtx5090/install.sh
 bash workspace/rtx5090/run_server.sh
 ```
 
-示例配置与集群脚本：`workspace/example/arrange_3_flowers_wrc_red.yml`、`workspace/example/run_oss_wandb_local.sh`。
+Example config and cluster script: `workspace/example/arrange_3_flowers_wrc_red.yml`, `workspace/example/run_oss_wandb_local.sh`.
 
 ---
 

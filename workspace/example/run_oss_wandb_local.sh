@@ -1,46 +1,46 @@
 #!/bin/bash
 # ============================================================================
-# Wall-OSS FSDP 训练启动（单机 / 多机均可）
+# Launch Wall-OSS FSDP training (single node or multi-node).
 #
-# 用法:
+# Usage:
 #   CONDA_HOME=/path/to/miniconda3 \
 #   CONFIG=workspace/example/arrange_3_flowers_wrc_red.yml \
 #     bash workspace/example/run_oss_wandb_local.sh
 #
-#   DEBUG=1 ...           # 快速冒烟
-#   WANDB_OFFLINE=1 ...   # 离线 wandb
+#   DEBUG=1 ...           # short smoke run
+#   WANDB_OFFLINE=1 ...   # offline wandb
 #
-# 说明:
-#   多机 RDMA / InfiniBand 请在集群镜像中预装；本脚本不再下载私有安装包。
+# Notes:
+#   Install multi-node RDMA / InfiniBand in the cluster image. This script no longer downloads private packages.
 # ============================================================================
 set -euo pipefail
 nvidia-smi || true
 
-# ── 仓库根目录 (workspace/example/ → 上溯 2 级) ──
+# ── Repository root (workspace/example/ → two levels up) ──
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-# ── 配置路径 (env CONFIG > $1 > 默认) ──
+# ── Config path (env CONFIG > $1 > default) ──
 CONFIG="${CONFIG:-${1:-arrange_3_flowers_wrc_red.yml}}"
 if [[ "${CONFIG}" != *"/"* ]]; then
     CONFIG="workspace/example/${CONFIG}"
 fi
 
-# ── conda 环境 ──
+# ── conda environment ──
 CONDA_HOME="${CONDA_HOME:?Set CONDA_HOME to your miniconda root}"
 CONDA_ENV="${CONDA_ENV:-wallx}"
 source "${CONDA_HOME}/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV}"
 
-# ── 环境变量 ──
+# ── environment variables ──
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
 export TMPDIR="${TMPDIR:-/tmp}"
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
-# Wall-OSS 用 repo 内 wall_x；清掉可能污染的 PYTHONPATH
+# Wall-OSS imports wall_x from this repo; drop any stale PYTHONPATH.
 export PYTHONPATH="${REPO_DIR}"
 
-# ── wandb（可选；通过环境变量配置）──
+# ── wandb (optional; configured through environment variables) ──
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY 2>/dev/null || true
 if [[ "${WANDB_OFFLINE:-0}" != "1" && "${WANDB_OFFLINE:-}" != "true" ]]; then
     # Set WANDB_BASE_URL / WANDB_API_KEY / WANDB_ENTITY if using a custom wandb server.
@@ -49,7 +49,7 @@ if [[ "${WANDB_OFFLINE:-0}" != "1" && "${WANDB_OFFLINE:-}" != "true" ]]; then
     export WANDB_ENTITY="${WANDB_ENTITY:-}"
 fi
 
-# ── DEBUG=1: 小步数冒烟 ──
+# ── DEBUG=1: short smoke run ──
 if [[ "${DEBUG:-0}" == "1" || "${DEBUG:-}" == "true" ]]; then
     _DBG_CONFIG="/tmp/oss_debug_$(basename "${CONFIG%.*}").yml"
     python - "${CONFIG}" "${_DBG_CONFIG}" <<'PY'
@@ -74,10 +74,10 @@ if ck.get("save_path"):
 yaml.safe_dump(c, open(dst, "w"), allow_unicode=True, sort_keys=False)
 PY
     CONFIG="${_DBG_CONFIG}"
-    echo "[DEBUG] 快速冒烟配置: ${CONFIG}"
+    echo "[DEBUG] smoke config: ${CONFIG}"
 fi
 
-# ── 分布式参数 (优先集群注入) ──
+# ── distributed args (prefer values injected by the cluster) ──
 if [[ -n "${NPROC_PER_NODE:-}" ]]; then :;
 elif [[ -n "${LOCAL_WORLD_SIZE:-}" ]]; then NPROC_PER_NODE="${LOCAL_WORLD_SIZE}";
 elif [[ -n "${TOTAL_PROCS:-}" && -n "${WORLD_SIZE:-}" ]]; then NPROC_PER_NODE=$((TOTAL_PROCS / WORLD_SIZE));

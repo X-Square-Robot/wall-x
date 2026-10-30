@@ -1,66 +1,66 @@
-# RTX 5090 推理部署
+# RTX 5090 inference deployment
 
-本目录包含在 **NVIDIA RTX 5090** 上部署 Wall-X 推理服务的脚本与文档。
+Scripts and docs for deploying the Wall-X inference service on an **NVIDIA RTX 5090**.
 
-## 目录结构
+## Directory layout
 
 ```
 workspace/rtx5090/
-├── README.md          # 本文件
-├── DEPLOY.md          # 通用部署指南（任意 5090 机器）
-├── install.sh         # 环境安装脚本
-├── run_server.sh      # 启动推理服务
-├── env.example        # 路径配置模板
-└── local/             # 本机专用配置（可按需修改，勿提交敏感路径）
-    ├── env.sh         # 本机路径
-    └── NOTES.md       # 本机实测记录
+├── README.md          # this file
+├── DEPLOY.md          # general deployment guide (any 5090 machine)
+├── install.sh         # environment install script
+├── run_server.sh      # start the inference service
+├── env.example        # path-config template
+└── local/             # machine-local config (edit as needed; do not commit sensitive paths)
+    ├── env.sh         # local paths
+    └── NOTES.md       # local bring-up notes
 ```
 
-## 快速开始
+## Quick start
 
-**1. 配置路径**
+**1. Set paths**
 
 ```bash
 cp workspace/rtx5090/env.example workspace/rtx5090/local/env.sh
-# 编辑 local/env.sh，填入 CONDA_SH、CONDA_ENV、LEROBOT_DIR、CHECKPOINT_PATH
+# Edit local/env.sh and fill in CONDA_SH, CONDA_ENV, LEROBOT_DIR, CHECKPOINT_PATH
 ```
 
-**2. 安装环境**（在仓库根目录执行）
+**2. Install the environment** (from the repository root)
 
 ```bash
 bash workspace/rtx5090/install.sh
 ```
 
-**3. 启动服务**
+**3. Start the service**
 
 ```bash
 bash workspace/rtx5090/run_server.sh
 ```
 
-**4. 健康检查**
+**4. Health check**
 
 ```bash
-curl http://127.0.0.1:44660/healthz   # 期望: OK
+curl http://127.0.0.1:44660/healthz   # expected: OK
 ```
 
-## 文档说明
+## Documents
 
-| 文件 | 用途 |
-|------|------|
-| [DEPLOY.md](./DEPLOY.md) | 通用部署流程，使用占位符路径，适合任意 5090 推理机 |
-| [local/NOTES.md](./local/NOTES.md) | 本机实测记录（环境信息、踩坑、验证结果） |
+| File | Purpose |
+|------|---------|
+| [DEPLOY.md](./DEPLOY.md) | General deployment flow with placeholder paths, for any 5090 inference machine |
+| [local/NOTES.md](./local/NOTES.md) | Machine-specific notes (environment, pitfalls, verification) |
 
-## 环境变量
+## Environment variables
 
-脚本通过 `local/env.sh` 加载以下变量：
+Scripts load these variables from `local/env.sh`:
 
-| 变量 | 说明 |
-|------|------|
-| `CONDA_SH` | conda 初始化脚本路径 |
-| `CONDA_ENV` | conda 环境名或 `--prefix` 全路径 |
-| `LEROBOT_DIR` | LeRobot 源码目录 |
-| `CHECKPOINT_PATH` | 模型 checkpoint 目录 |
-| `PORT` | 服务端口（默认 44660） |
-| `CUDA_ID` | GPU 编号（默认 0） |
+| Variable | Description |
+|----------|-------------|
+| `CONDA_SH` | Path to the conda init script |
+| `CONDA_ENV` | Conda environment name, or a full `--prefix` path |
+| `LEROBOT_DIR` | LeRobot source directory |
+| `CHECKPOINT_PATH` | Model checkpoint directory |
+| `PORT` | Service port (default 44660) |
+| `CUDA_ID` | GPU index (default 0) |
 
-服务启动时还会设置 `ENABLE_FAST_PREPROCESS=false`、`ENABLE_CUDA_GRAPH=1` 等，详见 [DEPLOY.md](./DEPLOY.md)。
+The server also sets `ENABLE_FAST_PREPROCESS=false`, `ENABLE_CUDA_GRAPH=1`, and related flags. See [DEPLOY.md](./DEPLOY.md).
