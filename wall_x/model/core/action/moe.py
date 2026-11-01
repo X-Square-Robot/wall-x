@@ -1,9 +1,28 @@
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint as cp
+
 from transformers.activations import ACT2FN
 
-from wall_x.model.core.ops import permute, unpermute
+from wall_x.model.core.action.layout import (
+    TwoExpertLayout,
+    fixed_two_expert_action_ranges,
+    fixed_two_expert_segments,
+    prepare_two_expert_layout,
+    resolve_two_expert_action_ranges,
+)
+from wall_x.model.core.ops import silu_and_mul, two_expert_pack, two_expert_unpack
+
+
+__all__ = [
+    "TwoExpertLayout",
+    "fixed_two_expert_action_ranges",
+    "fixed_two_expert_segments",
+    "prepare_two_expert_layout",
+    "resolve_two_expert_action_ranges",
+    "TokenTypeRouter",
+    "BlockSparseMLP",
+    "SparseMoeBlock",
+]
 
 
 class TokenTypeRouter(nn.Module):
@@ -41,27 +60,26 @@ class BlockSparseMLP(nn.Module):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
 
         self.act_fn = ACT2FN[self.hidden_act]
+        self.use_silu_and_mul = self.hidden_act in ("silu", "swish")
 
     # FIXME: The full MLP is recomputed for now; recomputing only activations can be optimized later.
     def _full_mlp(self, hidden_state):
         gate_up_out = self.gate_up_proj(hidden_state)
-        gate_out, up_out = gate_up_out.split(
-            [self.intermediate_size, self.intermediate_size], dim=-1
-        )
 
-        act_out = self.act_fn(gate_out) * up_out
+        if self.use_silu_and_mul:
+            act_out = silu_and_mul(gate_up_out, inplace=True)
+        else:
+            gate_out, up_out = gate_up_out.split(
+                [self.intermediate_size, self.intermediate_size], dim=-1
+            )
+            act_out = self.act_fn(gate_out) * up_out
         return self.down_proj(act_out)
 
     def forward(self, hidden_state):
-        if self.use_selective_recompute:
-            # Checkpoint-recompute the whole expert MLP
-            return cp.checkpoint(
-                self._full_mlp,
-                hidden_state,
-                use_reentrant=False,
-            )
-        else:
-            return self._full_mlp(hidden_state)
+        # Action expert operates on very few action tokens (~192/sample), so its
+        # activations are tiny; recomputing the full expert MLP costs compute for
+        # negligible memory saving. Always run directly (no checkpoint).
+        return self._full_mlp(hidden_state)
 
 
 class SparseMoeBlock(nn.Module):
@@ -86,30 +104,43 @@ class SparseMoeBlock(nn.Module):
         self.dim_inputs = config.dim_inputs
         self.permuted = config.mot_opt
 
+    def _fixed_two_expert_action_ranges(self, experts_indices: torch.Tensor):
+        if self.num_experts != 2:
+            raise ValueError("fixed scatter MoE path requires num_experts == 2")
+        return fixed_two_expert_action_ranges(experts_indices)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         experts_indices: torch.Tensor,
-        start_indices: torch.Tensor,
-        end_indices: torch.Tensor,
+        action_starts: torch.Tensor = None,
+        action_ends: torch.Tensor = None,
+        expert_segments: tuple[tuple[int, int], tuple[int, int]] = None,
+        two_expert_layout: TwoExpertLayout = None,
     ) -> torch.Tensor:
+        batch_size, seq_length = experts_indices.shape
+        if two_expert_layout is None:
+            two_expert_layout = prepare_two_expert_layout(
+                experts_indices,
+                batch_size=batch_size,
+                seq_length=seq_length,
+                action_starts=action_starts,
+                action_ends=action_ends,
+                device=hidden_states.device,
+            )
+        expert_segments = two_expert_layout.expert_segments
 
         if self.permuted:
             permuted_inputs = hidden_states
         else:
-            batch_size, seq_length, hidden_dim = hidden_states.shape
-
-            flat_hidden = hidden_states.reshape(-1, hidden_dim)
-            experts_indices = experts_indices.reshape(-1)
-            probs = torch.ones_like(experts_indices, dtype=torch.float32).reshape(-1, 1)
-            permuted_inputs, row_id_map = permute(flat_hidden, experts_indices)
+            permuted_inputs = two_expert_pack(hidden_states, two_expert_layout)
 
         # buffer
         final_output = torch.zeros_like(permuted_inputs)
 
         # Expert forward, including selective recompute
         for expert_idx, expert in enumerate(self.experts):
-            start, end = start_indices[expert_idx], end_indices[expert_idx]
+            start, end = expert_segments[expert_idx]
             if start == end:
                 continue
 
@@ -122,5 +153,6 @@ class SparseMoeBlock(nn.Module):
         if self.permuted:
             return final_output
         else:
-            final_output = unpermute(final_output, row_id_map, probs)
-            return final_output.reshape(batch_size, seq_length, hidden_dim)
+            return two_expert_unpack(
+                final_output, batch_size, seq_length, two_expert_layout
+            )

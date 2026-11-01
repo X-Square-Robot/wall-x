@@ -18,7 +18,7 @@ This guide explains how to fine-tune, evaluate in simulation, and deploy on real
 
 | 文档 | 用途 |
 |------|------|
-| [TRAIN_ARRANGE_3_FLOWERS.md](./TRAIN_ARRANGE_3_FLOWERS.md) | 插花训练示例 |
+| [TRAIN_ARRANGE_3_FLOWERS.md](./TRAIN_ARRANGE_3_FLOWERS.md) | 插花训练示例。loader 会截断尾部自由度并做相对 6D 转换 |
 | [rtx5090/DEPLOY.md](./rtx5090/DEPLOY.md) | **RTX 5090 推理部署（通用）**：环境安装、服务启动、排障与检查清单 |
 | [rtx5090/README.md](./rtx5090/README.md) | RTX 5090 快速开始：一键脚本与目录说明 |
 

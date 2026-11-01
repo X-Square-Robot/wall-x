@@ -1,7 +1,6 @@
-import math
-
+from torch.optim.lr_scheduler import LambdaLR
 from torch.optim import Optimizer
-from torch.optim.lr_scheduler import ConstantLR, LambdaLR
+import math
 
 
 def create_cosine_scheduler(
@@ -19,7 +18,7 @@ def create_cosine_scheduler(
 
     def lr_lambda(current_step: int):
         if current_step < num_warmup_steps:
-            # Start from peak_lr / (warmup_steps + 1).
+            # OpenPI warmup: start from peak_lr / (warmup_steps + 1)
             init_lr = peak_lr / (num_warmup_steps + 1)
             current_lr = init_lr + (peak_lr - init_lr) * current_step / num_warmup_steps
             return current_lr / peak_lr  # LambdaLR multiplies by base_lr
@@ -53,11 +52,31 @@ def create_step_scheduler(
 
 def create_constant_scheduler(
     optimizer: Optimizer,
-    factor: float = 1 / 3,
-    total_iters: int = 5,
     last_epoch: int = -1,
+    num_warmup_steps: int = 0,
 ):
-    return ConstantLR(optimizer, factor, total_iters, last_epoch)
+    """Constant LR at the target value, with optional linear warmup.
+
+    With ``num_warmup_steps <= 0`` the LR is constant at the target from step 0
+    (the previous behaviour). With ``num_warmup_steps = n > 0`` the LR ramps
+    linearly from ``1/(n+1)`` of the target up to the full target over the first
+    ``n`` steps, then stays constant::
+
+        factor(step) = 1/(n+1) + (1 - 1/(n+1)) * step / n   for step < n
+        factor(step) = 1.0                                   for step >= n
+
+    e.g. n=4: step 0..4 -> 0.2, 0.4, 0.6, 0.8, 1.0 (x target). The initial LR is
+    non-zero by design. Covered by test_constant_scheduler_supports_warmup_per_lr_group.
+    """
+
+    def lr_lambda(current_step: int):
+        if num_warmup_steps <= 0 or current_step >= num_warmup_steps:
+            return 1.0
+
+        init_lr_factor = 1.0 / (num_warmup_steps + 1)
+        return init_lr_factor + (1.0 - init_lr_factor) * current_step / num_warmup_steps
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
 def get_scheduler(optimizer: Optimizer, lr_scheduler_type: str, **kwargs):

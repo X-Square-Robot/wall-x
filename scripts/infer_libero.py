@@ -15,6 +15,7 @@ from pathlib import Path
 
 import yaml
 
+
 LIBERO_DEFAULT_MAX_INFER_TIMES = {
     "libero_spatial": 22,
     "libero_object": 28,
@@ -211,10 +212,7 @@ def main() -> int:
     args = parse_args()
     _ensure_local_harrix_on_path()
 
-    from wall_x._vendor.harrix.eval_config import (
-        autofill_from_checkpoint,
-        load_eval_config,
-    )
+    from wall_x._vendor.harrix.eval_config import autofill_from_checkpoint, load_eval_config
 
     raw = _load_or_build_raw_config(args)
 

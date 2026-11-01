@@ -19,17 +19,17 @@ Recommended: pass a finetune YAML (paths in the config can be placeholders; over
 with CLI flags if needed)::
 
     python scripts/compute_norm_stats.py \\
-        --train_config /path/to/train_config.yml
+        --train_config workspace/example/libero.yml
 
-Multi-task example::
+Qwen3.5 LeRobot template::
 
     python scripts/compute_norm_stats.py \\
-        --train_config /path/to/multitask_config.yml
+        --train_config workspace/example/lerobot/qwen3_5_lerobot_template.yml
 
 Override dataset or output path from the command line::
 
     python scripts/compute_norm_stats.py \\
-        --train_config /path/to/train_config.yml \\
+        --train_config workspace/example/libero.yml \\
         --data_root /path/to/repo_id \\
         --output_path /path/to/norm_stats_path
 
@@ -42,7 +42,8 @@ Without a train config (global stats only, no per-DOF relative slices)::
 Requirements
 ------------
 - Local LeRobot v3 dataset at ``--data_root`` (or ``data.lerobot_config.repo_id``)
-- ``lerobot>=0.3``, ``datasets``, ``pyarrow``, ``numpy``, ``pyyaml``, ``tqdm``
+- ``lerobot>=0.3``, ``numpy``, ``pyyaml``, ``tqdm``
+- Run from the wall-x repo root (or set ``PYTHONPATH`` so ``wall_x`` imports resolve)
 
 After running, set ``norm_stats_path`` in your training YAML to the generated JSON.
 """
@@ -56,40 +57,21 @@ from typing import Any
 
 import numpy as np
 import yaml
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from numba import jit, prange
 from tqdm import tqdm
 
-# Match wall_x.data.backends.lerobot.rotation_layout.LAYOUT_SKIP_KEYS:
-# only virtual ``action_padding`` is absent from the on-disk vector.
+from wall_x._vendor.x2robot_utils.geometry import (
+    canonicalize_euler_zyx_batch_nb,
+    euler_to_matrix_zyx_batch_nb,
+    matrix_to_euler_zyx_batch_nb,
+    so3_to_matrix_batch_nb,
+)
+
+# Match the LeRobot loader: only virtual action_padding is absent from the
+# on-disk vector. Trailing velocity/height/head are truncated by width when
+# the configured layout is shorter than the dataset vector.
 SKIP_DOF_KEYS = frozenset({"action_padding"})
-
-_GEOMETRY_FUNCS_LOADED = False
-
-
-def _ensure_geometry_funcs() -> None:
-    global _GEOMETRY_FUNCS_LOADED
-    global canonicalize_euler_zyx_batch_nb
-    global euler_to_matrix_zyx_batch_nb
-    global matrix_to_euler_zyx_batch_nb
-    global so3_to_matrix_batch_nb
-
-    if _GEOMETRY_FUNCS_LOADED:
-        return
-
-    try:
-        from wall_x._vendor.x2robot_utils.geometry import (
-            canonicalize_euler_zyx_batch_nb,
-            euler_to_matrix_zyx_batch_nb,
-            matrix_to_euler_zyx_batch_nb,
-            so3_to_matrix_batch_nb,
-        )
-    except ImportError as exc:
-        raise RuntimeError(
-            "compute_norm_stats.py requires the vendored x2robot_utils geometry "
-            "helpers. Install Wall-X first so wall_x._vendor is available."
-        ) from exc
-
-    _GEOMETRY_FUNCS_LOADED = True
 
 
 @dataclass
@@ -205,8 +187,8 @@ def parse_train_config(config: dict[str, Any]) -> TrainConfigContext:
         propri_ranges=config_to_index_ranges(agent_pos_config),
         action_ranges=config_to_index_ranges(dof_config),
         action_chunk=action_chunk,
-        dof_config=dof_config,
-        agent_pos_config=agent_pos_config,
+        dof_config={str(k): int(v) for k, v in dof_config.items()},
+        agent_pos_config={str(k): int(v) for k, v in agent_pos_config.items()},
     )
 
 
@@ -223,12 +205,7 @@ def _prepare_arrays_for_layout(
     agent_pos_config: dict[str, int],
     dof_config: dict[str, int],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Match LeRobot training loader: convert 3D Euler slices to 6D when config
-    uses rotation_6D keys but the dataset stores 14-dim Euler vectors.
-    Extra trailing DOFs beyond the active layout are truncated (e.g. when the
-    dataset still has velocity/height/head but training uses action_padding).
-    """
+    """Match the LeRobot loader: truncate trailing DOFs, then Euler to 6D."""
     from wall_x.data.backends.lerobot.rotation_layout import (
         euler_layout_dim,
         layout_uses_6d_rotation,
@@ -294,60 +271,11 @@ def _prepare_arrays_for_layout(
     return states, actions
 
 
-def resolve_lerobot_dataset_paths(dataset_root: Path) -> tuple[str, Path]:
-    """Return ``(repo_id, root)`` for a local LeRobot dataset directory."""
-    root = dataset_root.expanduser().resolve()
-    if not root.is_dir():
-        raise FileNotFoundError(f"LeRobot dataset root not found: {root}")
-    return root.name, root
-
-
-def _load_parquet_state_action_only(
-    data_root: Path,
-    state_key: str,
-    action_key: str,
-):
-    """
-    Read only state/action columns from LeRobot v3 parquet.
-
-    Does not load image/video columns or decode mp4 files.
-    """
-    import pyarrow.dataset as pa_ds
-    from datasets import Dataset
-
-    root = data_root.expanduser().resolve()
-    paths = sorted((root / "data").glob("*/*.parquet"))
-    if not paths:
-        raise FileNotFoundError(f"No parquet files under {root / 'data'}")
-
-    logging.info(
-        "Reading parquet columns %r, %r only (no video/images)",
-        state_key,
-        action_key,
-    )
-    arrow_dataset = pa_ds.dataset([str(path) for path in paths], format="parquet")
-    table = arrow_dataset.to_table(columns=[state_key, action_key])
-    return Dataset(table)
-
-
 def _load_state_action_table(
     data_root: Path,
     state_key: str,
     action_key: str,
 ):
-    root = data_root.expanduser().resolve()
-    if root.is_dir() and (root / "meta" / "info.json").is_file():
-        table = _load_parquet_state_action_only(root, state_key, action_key)
-        return table, state_key, action_key
-
-    try:
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset
-    except ImportError as exc:
-        raise RuntimeError(
-            "compute_norm_stats.py requires LeRobot. Install it first, for example "
-            "`pip install lerobot==0.4.4` or follow the repository README."
-        ) from exc
-
     dataset = LeRobotDataset(str(data_root), root=None, video_backend="pyav")
     non_image_columns = [
         col for col in dataset.features if "image" not in col and col not in {"task"}
@@ -419,8 +347,6 @@ def _compute_delta_from_state_and_abs_rot(
     rotations: np.ndarray, state: np.ndarray
 ) -> np.ndarray:
     """Relative rotation: R_rel = R_abs @ R_state^T (same convention as the loader)."""
-    _ensure_geometry_funcs()
-
     if rotations.shape[-1] == 3:
         rotations_matrix = euler_to_matrix_zyx_batch_nb(rotations)
         out_is_euler = True
@@ -504,37 +430,12 @@ def _collect_relative_rotation(
     states: np.ndarray,
     index_range: list[int],
     action_chunk: int,
-    max_anchors: int = 50000,
 ) -> np.ndarray:
-    """
-    Per-anchor action chunk relative to anchor state (matches lerobot loader).
-
-    Unlike cartesian relative, each anchor processes a full [chunk, dim] action
-    clip against a single proprio rotation at the anchor frame.
-
-    Large datasets subsample anchors (uniform stride, capped by ``max_anchors``)
-    so q01/q99 stay stable without an O(N) Python loop over every frame.
-    """
     start, end = index_range
     max_start = max(0, len(actions) - action_chunk)
-    if max_start == 0:
-        return np.empty((0, end - start), dtype=np.float32)
-
-    if max_start <= max_anchors:
-        anchor_indices = range(max_start)
-    else:
-        stride = int(np.ceil(max_start / max_anchors))
-        anchor_indices = range(0, max_start, stride)
-        logging.info(
-            "  relative rotation: subsample ~%d/%d anchors (stride=%d)",
-            (max_start + stride - 1) // stride,
-            max_start,
-            stride,
-        )
-
     chunks = []
     for anchor_idx in tqdm(
-        anchor_indices,
+        range(max_start),
         desc="  relative rotation anchors",
         leave=False,
     ):
@@ -695,8 +596,8 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 examples:
-  %(prog)s --train_config /path/to/train_config.yml
-  %(prog)s --train_config /path/to/multitask_config.yml \\
+  %(prog)s --train_config workspace/example/libero.yml
+  %(prog)s --train_config workspace/example/lerobot/qwen3_5_lerobot_template.yml \\
       --data_root /path/to/repo_id --output_path /path/to/norm_stats_path
   %(prog)s --data_root /path/to/lerobot_dataset --output_path /path/to/norm_stats.json
 """,

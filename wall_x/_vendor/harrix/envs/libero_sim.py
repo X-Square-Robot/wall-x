@@ -12,43 +12,54 @@ import os
 from typing import Any, Optional
 
 import numpy as np
-from robosuite.wrappers import VisualizationWrapper
 
 logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# One-time side effect: auto-create ~/.libero/config.yaml so importing LIBERO
-# does not trigger an interactive prompt.
+# LIBERO config bootstrap. Called lazily (from the functions that actually use
+# LIBERO), NOT at import time — importing this module only registers the env
+# class and must not require LIBERO/robosuite or touch ~/.libero.
 # ============================================================
 
 
 def _ensure_libero_config() -> None:
-    import yaml as _yaml
+    """Create ``$LIBERO_CONFIG_PATH/config.yaml`` (default ``~/.libero``) if absent
+    so that importing ``libero.libero`` does not drop into its interactive
+    ``input()`` prompt — which raises EOFError under non-interactive/mpirun runs.
+
+    Locate the package via ``importlib`` instead of ``import libero.libero``:
+    importing it is precisely what triggers the prompt when the config is missing,
+    so the old import-to-find-the-path approach could never bootstrap a fresh node.
+    Idempotent and safe to call on every LIBERO entry point.
+    """
+    import importlib.util
 
     libero_config_path = os.environ.get(
         "LIBERO_CONFIG_PATH", os.path.expanduser("~/.libero")
     )
     config_file = os.path.join(libero_config_path, "config.yaml")
+    if os.path.exists(config_file):
+        return
 
-    if not os.path.exists(config_file):
-        os.makedirs(libero_config_path, exist_ok=True)
-        import libero.libero as _libero_pkg
+    spec = importlib.util.find_spec("libero.libero")
+    if spec is None or not spec.origin:
+        return  # LIBERO not installed; nothing to pre-configure
 
-        benchmark_root = os.path.dirname(os.path.abspath(_libero_pkg.__file__))
-        default_paths = {
-            "benchmark_root": benchmark_root,
-            "bddl_files": os.path.join(benchmark_root, "./bddl_files"),
-            "init_states": os.path.join(benchmark_root, "./init_files"),
-            "datasets": os.path.join(benchmark_root, "../datasets"),
-            "assets": os.path.join(benchmark_root, "./assets"),
-        }
-        with open(config_file, "w") as f:
-            _yaml.dump(default_paths, f)
-        logger.info("Auto-created LIBERO config: %s", config_file)
+    import yaml as _yaml
 
-
-_ensure_libero_config()
+    benchmark_root = os.path.dirname(os.path.abspath(spec.origin))
+    os.makedirs(libero_config_path, exist_ok=True)
+    default_paths = {
+        "benchmark_root": benchmark_root,
+        "bddl_files": os.path.join(benchmark_root, "./bddl_files"),
+        "init_states": os.path.join(benchmark_root, "./init_files"),
+        "datasets": os.path.join(benchmark_root, "../datasets"),
+        "assets": os.path.join(benchmark_root, "./assets"),
+    }
+    with open(config_file, "w") as f:
+        _yaml.dump(default_paths, f)
+    logger.info("Auto-created LIBERO config: %s", config_file)
 
 
 # ============================================================
@@ -58,6 +69,7 @@ _ensure_libero_config()
 
 def get_task_suite(task_suite_name: str):
     """Load a LIBERO task suite."""
+    _ensure_libero_config()
     from libero.libero import benchmark
 
     return benchmark.get_benchmark_dict()[task_suite_name]()
@@ -78,6 +90,36 @@ def get_libero_dummy_action() -> list[float]:
 # ============================================================
 
 
+def _install_offsamples_hook(offsamples: int) -> None:
+    """Set the MSAA sample count before the render context is created.
+
+    EGL off-screen MSAA resolve is the only source of run-to-run
+    nondeterminism in LIBERO evaluation: the first wrist-camera frame already
+    differs by a few pixel LSBs, which closed-loop control amplifies into
+    success-rate noise. With ``offsamples=0`` repeated full evaluations are
+    bit-identical.
+
+    The value must be applied before robosuite creates its render context,
+    because the context allocates the MSAA buffer from
+    ``vis.quality.offsamples`` at construction time and ``OffScreenRenderEnv``
+    creates it in its constructor. The hook is therefore installed on
+    ``MjRenderContext.__init__``.
+    """
+    from robosuite.utils import binding_utils
+
+    if getattr(binding_utils.MjRenderContext, "_wallx_offsamples_hook", None) == offsamples:
+        return
+    orig_init = binding_utils.MjRenderContext.__init__
+
+    def patched_init(self, sim, *args, **kwargs):
+        raw = getattr(sim.model, "_model", sim.model)
+        raw.vis.quality.offsamples = offsamples
+        return orig_init(self, sim, *args, **kwargs)
+
+    binding_utils.MjRenderContext.__init__ = patched_init
+    binding_utils.MjRenderContext._wallx_offsamples_hook = offsamples
+
+
 def create_libero_engine(
     task_id: int,
     task_suite_name: str,
@@ -85,8 +127,14 @@ def create_libero_engine(
     seed: int = 7,
 ) -> Any:
     """Construct one LIBERO robosuite engine."""
+    _ensure_libero_config()
+    from robosuite.wrappers import VisualizationWrapper
     from libero.libero import get_libero_path
     from libero.libero.envs import OffScreenRenderEnv
+
+    offsamples = os.environ.get("WALLX_RENDER_OFFSAMPLES", "").strip()
+    if offsamples:
+        _install_offsamples_hook(int(offsamples))
 
     task_suite = get_task_suite(task_suite_name)
     task = task_suite.get_task(task_id)
@@ -141,7 +189,9 @@ def pick_initial_state(
         return default_states[episode_idx]
 
     if custom_initial_states is None:
-        raise ValueError(f"custom initial states not loaded for {initial_states_path}")
+        raise ValueError(
+            f"custom initial states not loaded for {initial_states_path}"
+        )
     key = task_desc.replace(" ", "_")
     ep_key = f"demo_{episode_idx}"
     record = custom_initial_states[key][ep_key]

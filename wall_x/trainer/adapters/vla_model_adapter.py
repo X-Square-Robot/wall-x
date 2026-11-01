@@ -5,13 +5,17 @@ import torch.distributed as dist
 from tqdm import tqdm
 
 from wall_x.trainer.adapters.base_adapter import ModelAdapter
-from wall_x.trainer.optimizer.dmuon import is_dmuon_model
 from wall_x.trainer.trainer_utils import (
     compute_action_metrics,
-    load_qwen_pretrain_weight,
     load_wallx_processors_from_cfg,
+    load_qwen_pretrain_weight,
     save_text_results_to_file,
 )
+from wall_x.trainer.optimizer.dmuon import is_dmuon_model
+from wall_x.utils.constant import is_action_dataset_name
+
+
+_MISSING = object()
 
 
 class VLAdapter(ModelAdapter):
@@ -38,6 +42,8 @@ class VLAdapter(ModelAdapter):
         self._dmuon_module = None
         self._dmuon_import_checked = False
         self._dmuon_named_param_cache = None
+        self._mfu_missing_info_logged = False
+        self._mfu_compute_error_logged = False
 
     def _get_dmuon_module(self):
         if not self._dmuon_import_checked:
@@ -107,6 +113,15 @@ class VLAdapter(ModelAdapter):
         flat = dataclasses.asdict(self.cfg.model)
         flat["model_type"] = self.cfg.model_type
         flat["data"] = dict(self.cfg._raw_data or {})
+        # Model topology and data processing must use the same authoritative
+        # task-level switch.  In particular, Dataset V2 keeps its processing
+        # copy under processors.epilogue.params rather than the legacy
+        # ``data:`` section.  Leaving this field absent here makes the Qwen
+        # configs default it to False and creates ``action_processor.propri_proj``
+        # even when task.use_state_string_representation is True.
+        flat["data"]["use_state_string_representation"] = (
+            self.cfg.task.use_state_string_representation
+        )
         flat["dof_config"] = self.cfg.task.dof_config
         flat["agent_pos_config"] = self.cfg.task.agent_pos_config
         if self.cfg.task.ar_dof_config is not None:
@@ -114,10 +129,17 @@ class VLAdapter(ModelAdapter):
         flat["batch_size_per_gpu"] = self.cfg.hyperparams.batch_size_per_gpu
         return flat
 
-    def load_processor(self, action_statistic_dof):
+    def load_processor(self, action_statistic_dof, ar_normalizer=None):
+        # ``ar_normalizer`` lets openloop scaling-eval inject the AR-mode
+        # normalizer for instruction-config override; falls back to the
+        # adapter's own ``normalizer_action`` (training path) when unset.
         processors_dict = load_wallx_processors_from_cfg(
             self.cfg,
-            normalizer=getattr(self, "normalizer_action", None),
+            normalizer=(
+                ar_normalizer
+                if ar_normalizer is not None
+                else getattr(self, "normalizer_action", None)
+            ),
             action_statistic_dof=action_statistic_dof,
         )
         self.logger.info(
@@ -156,12 +178,22 @@ class VLAdapter(ModelAdapter):
     def create_model(self, processor, tokenizer_mixin, model_config):
         ModelClass, _ = self._get_model_and_config_class()
         use_selective_recompute = self.cfg.distributed.use_selective_recompute
-        return ModelClass(
+        model = ModelClass(
             model_config,
             processor,
             tokenizer_mixin=tokenizer_mixin,
             use_selective_recompute=use_selective_recompute,
         )
+        recompute_cfg = getattr(self.cfg.distributed, "recompute", None)
+        recompute_on = recompute_cfg is not None and recompute_cfg.enable
+        if self.cfg.distributed.use_gradient_checkpointing or recompute_on:
+            if recompute_on and getattr(recompute_cfg, "decoder", None) is not None:
+                model.gradient_checkpointing_enable(recompute=recompute_cfg)
+            else:
+                model.gradient_checkpointing_enable()
+            if self.logger:
+                self.logger.info("Enabled gradient checkpointing for VLA model")
+        return model
 
     def load_weights(self, model, normalizer_action, normalizer_propri, **kwargs):
         import copy
@@ -172,9 +204,13 @@ class VLAdapter(ModelAdapter):
             model, err = load_qwen_pretrain_weight(
                 model, self.cfg.model.pretrained_path
             )
+            self.validate_pretrained_load_result(model, err)
 
         if processor is not None:
-            model.resize_token_embeddings(len(processor.tokenizer))
+            current_vocab_size = model.get_input_embeddings().weight.shape[0]
+            target_vocab_size = max(current_vocab_size, len(processor.tokenizer))
+            if target_vocab_size != current_vocab_size:
+                model.resize_token_embeddings(target_vocab_size)
 
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
@@ -198,11 +234,39 @@ class VLAdapter(ModelAdapter):
 
         return model
 
+    def validate_pretrained_load_result(self, model, load_result):
+        """Variant hook for enforcing checkpoint coverage after a non-strict load."""
+        del model
+        if self.cfg.model.action_tokenizer_type not in {
+            "wall_vlm_rvq_v3_2",
+            "wall_vlm_rvq_v3_3_ar",
+        }:
+            return
+        allowed_missing_parts = (
+            "model.action_processor.",
+            "_action.",
+            "mlp_action_expert.",
+            "norm_action.",
+        )
+        bad_missing = [
+            key
+            for key in load_result.missing_keys
+            if not any(part in key for part in allowed_missing_parts)
+        ]
+        bad_unexpected = [
+            key for key in load_result.unexpected_keys if not key.startswith("mtp.")
+        ]
+        if bad_missing or bad_unexpected:
+            raise RuntimeError(
+                "Wall-VLM backbone checkpoint coverage failed: "
+                f"missing={bad_missing[:16]}, unexpected={bad_unexpected[:16]}"
+            )
+
     # ---- FSDP wrapping ----
     def get_transformer_layer_cls(self):
         """Return the FSDP transformer-wrap layer classes for this variant.
 
-        Subclass override - see the per-variant adapter for the actual
+        Subclass override — see the per-variant adapter for the actual
         layer classes.
         """
         raise NotImplementedError(
@@ -224,17 +288,37 @@ class VLAdapter(ModelAdapter):
         resume_state = None
         resume_batches = kwargs.get("resume_batches", 0)
         indices = kwargs.get("resume_indices")
+        sampler_state_path = kwargs.get("sampler_state_path")
+        dataset_state = kwargs.get("dataset_state")
+        dataset_skip_samples_per_rank = int(
+            kwargs.get("dataset_skip_samples_per_rank", 0) or 0
+        )
         if indices is None and self.cfg.checkpoint.resume_from:
             checkpoint_path = self.cfg.checkpoint.resume_from
             if os.path.isfile(checkpoint_path):
                 checkpoint_path = os.path.dirname(checkpoint_path)
             if os.path.isdir(checkpoint_path):
                 indices = self._load_episode_indices(checkpoint_path, rank)
+                candidate = os.path.join(
+                    checkpoint_path, f"sampler_state_rank_{rank}.pt"
+                )
+                if os.path.exists(candidate):
+                    sampler_state_path = candidate
 
-        if resume_batches or indices or kwargs.get("episode_container_checkpoint_path"):
+        if (
+            resume_batches
+            or indices
+            or sampler_state_path
+            or dataset_state
+            or dataset_skip_samples_per_rank
+            or kwargs.get("episode_container_checkpoint_path")
+        ):
             resume_state = {
                 "resume_batches": resume_batches,
                 "indices": indices,
+                "sampler_state_path": sampler_state_path,
+                "dataset_state": dataset_state,
+                "skip_samples_per_rank": dataset_skip_samples_per_rank,
                 "episode_container_checkpoint_path": kwargs.get(
                     "episode_container_checkpoint_path"
                 ),
@@ -245,9 +329,12 @@ class VLAdapter(ModelAdapter):
             world_size=world_size,
             processor=processor,
             tokenizer_mixin=kwargs.get("tokenizer_mixin"),
+            train_action_tokenizer=kwargs.get("train_action_tokenizer"),
+            val_action_tokenizer=kwargs.get("val_action_tokenizer"),
             normalizer_action=copy.deepcopy(kwargs.get("normalizer_action")),
             normalizer_propri=copy.deepcopy(kwargs.get("normalizer_propri")),
             model_config=kwargs.get("model_config"),
+            process_group=kwargs.get("process_group"),
             resume_state=resume_state,
         )
 
@@ -280,14 +367,18 @@ class VLAdapter(ModelAdapter):
         """
         import torch.distributed as dist
 
+        packing_active = bool(
+            (getattr(self, "_last_batch_info", None) or {}).get("packing_active")
+        )
+
         cross_entropy_loss = self.get_output_field(outputs, "cross_entropy_loss")
-        if cross_entropy_loss is not None:
+        if cross_entropy_loss is not None and not packing_active:
             step_stats["cross_entropy_loss"] = reduce_tensor_fn(
                 cross_entropy_loss
             ).item()
 
         flow_loss = self.get_output_field(outputs, "flow_loss")
-        if flow_loss is not None:
+        if flow_loss is not None and not packing_active:
             step_stats["flow_loss"] = reduce_tensor_fn(flow_loss).item()
 
         log_ce_loss = true_gather_fn(
@@ -300,35 +391,188 @@ class VLAdapter(ModelAdapter):
         if log_flow_loss is not None:
             step_stats["flow_loss"] = log_flow_loss
 
-        channel_loss_dict = self.get_output_field(outputs, "channel_loss_dict")
-        channel_loss_count_dict = self.get_output_field(
-            outputs, "channel_loss_count_dict"
+        if packing_active:
+            # TODO(packing): restore per-channel loss/action accuracy once CE
+            # tokens can be mapped back to packed sub-sample dataset names.
+            return
+
+        channel_loss_dict = self.get_output_field(outputs, "channel_loss_dict") or {}
+        channel_loss_count_dict = (
+            self.get_output_field(outputs, "channel_loss_count_dict") or {}
         )
-        if channel_loss_dict is not None:
-            for dataset_name_i in channel_loss_dict:
-                count_tensor = channel_loss_count_dict[dataset_name_i].clone()
-                loss_tensor = channel_loss_dict[dataset_name_i].detach().clone()
+        local_channel_keys = sorted(channel_loss_dict.keys())
+        dist_ready = dist.is_available() and dist.is_initialized()
+        if dist_ready:
+            metric_ref = None
+            for value in list(channel_loss_dict.values()) + list(
+                channel_loss_count_dict.values()
+            ):
+                if torch.is_tensor(value):
+                    metric_ref = value
+                    break
+            if metric_ref is None:
+                metric_ref = flow_loss if torch.is_tensor(flow_loss) else None
+            if metric_ref is None:
+                metric_ref = (
+                    cross_entropy_loss if torch.is_tensor(cross_entropy_loss) else None
+                )
 
-                dist.all_reduce(count_tensor, op=dist.ReduceOp.SUM)
-                dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+            metric_device = (
+                metric_ref.device
+                if metric_ref is not None
+                else (
+                    torch.device("cuda", torch.cuda.current_device())
+                    if torch.cuda.is_available()
+                    else torch.device("cpu")
+                )
+            )
+            has_local_channel = torch.tensor(
+                [len(local_channel_keys)],
+                device=metric_device,
+                dtype=torch.int64,
+            )
+            dist.all_reduce(has_local_channel, op=dist.ReduceOp.SUM)
+            has_any_channel = has_local_channel.item() > 0
+        else:
+            metric_ref = None
+            has_any_channel = bool(local_channel_keys)
 
-                cout_sum = count_tensor.item()
-                if cout_sum >= 0.5:
-                    step_stats[f"channel_loss_{dataset_name_i}"] = (
-                        loss_tensor.item() / cout_sum
+        if has_any_channel:
+            if dist_ready:
+                gathered_channel_keys = [None] * dist.get_world_size()
+                dist.all_gather_object(gathered_channel_keys, local_channel_keys)
+                channel_keys = sorted(
+                    {
+                        key
+                        for rank_keys in gathered_channel_keys
+                        for key in (rank_keys or [])
+                    }
+                )
+            else:
+                channel_keys = local_channel_keys
+
+            if metric_ref is None:
+                for value in list(channel_loss_dict.values()) + list(
+                    channel_loss_count_dict.values()
+                ):
+                    if torch.is_tensor(value):
+                        metric_ref = value
+                        break
+            if metric_ref is None:
+                metric_ref = flow_loss if torch.is_tensor(flow_loss) else None
+            if metric_ref is None:
+                metric_ref = (
+                    cross_entropy_loss if torch.is_tensor(cross_entropy_loss) else None
+                )
+            if metric_ref is None:
+                raise RuntimeError(
+                    "Cannot reduce channel metrics without a tensor device reference "
+                    "on this rank"
+                )
+
+            device = metric_ref.device
+            loss_count = len(channel_keys)
+            loss_count_pack = torch.zeros(
+                2, loss_count, device=device, dtype=torch.float32
+            )
+            for idx, key in enumerate(channel_keys):
+                loss_value = channel_loss_dict.get(key)
+                if loss_value is not None:
+                    loss_count_pack[0, idx] = loss_value.detach().to(
+                        dtype=torch.float32
+                    )
+                count_value = channel_loss_count_dict.get(key)
+                if count_value is not None:
+                    loss_count_pack[1, idx] = count_value.detach().to(
+                        dtype=torch.float32
                     )
 
-            if "action_accuracy" in channel_loss_dict and tokenizer_mixin is not None:
-                acc_tensor = channel_loss_dict["action_accuracy"].detach().clone()
-                dist.all_reduce(acc_tensor, op=dist.ReduceOp.SUM)
-                world_size = dist.get_world_size() if dist.is_initialized() else 1
-                step_stats["action_accuracy"] = acc_tensor.item() / world_size
+            if dist_ready:
+                dist.all_reduce(loss_count_pack, op=dist.ReduceOp.SUM)
 
-                for key in tokenizer_mixin.get_accuracy_keys():
-                    if key != "action_accuracy" and key in channel_loss_dict:
-                        rvq_acc_tensor = channel_loss_dict[key].detach().clone()
-                        dist.all_reduce(rvq_acc_tensor, op=dist.ReduceOp.SUM)
-                        step_stats[key] = rvq_acc_tensor.item() / world_size
+            loss_vec = loss_count_pack[0]
+            count_vec = loss_count_pack[1]
+            channel_loss_sums = {}
+            channel_counts = {}
+            for idx, dataset_name_i in enumerate(channel_keys):
+                cout_sum = count_vec[idx].item()
+                loss_sum = loss_vec[idx].item()
+                channel_loss_sums[dataset_name_i] = loss_sum
+                channel_counts[dataset_name_i] = cout_sum
+                if cout_sum >= 0.5:
+                    step_stats[f"channel_loss_{dataset_name_i}"] = (
+                        loss_sum / cout_sum
+                    )
+
+            ar_action_loss_weight = self.get_output_field(
+                outputs, "ar_action_loss_weight"
+            )
+            if ar_action_loss_weight is not None:
+                weight = (
+                    ar_action_loss_weight.detach().item()
+                    if torch.is_tensor(ar_action_loss_weight)
+                    else float(ar_action_loss_weight)
+                )
+                multimodal_loss_sum = 0.0
+                multimodal_count = 0.0
+                ar_action_loss_sum = 0.0
+                ar_action_count = 0.0
+                for dataset_name_i in channel_keys:
+                    # Flow metrics use the synthetic ``<dataset>_flow`` suffix;
+                    # only raw supervised CE channels participate here.
+                    if dataset_name_i.endswith("_flow"):
+                        continue
+                    if is_action_dataset_name(dataset_name_i):
+                        ar_action_loss_sum += channel_loss_sums[dataset_name_i]
+                        ar_action_count += channel_counts[dataset_name_i]
+                    else:
+                        multimodal_loss_sum += channel_loss_sums[dataset_name_i]
+                        multimodal_count += channel_counts[dataset_name_i]
+
+                total_count = multimodal_count + ar_action_count
+                step_stats["cross_entropy_loss_raw"] = (
+                    (multimodal_loss_sum + ar_action_loss_sum) / total_count
+                    if total_count > 0
+                    else 0.0
+                )
+                step_stats["cross_entropy_loss_weighted"] = (
+                    (multimodal_loss_sum + weight * ar_action_loss_sum) / total_count
+                    if total_count > 0
+                    else 0.0
+                )
+                step_stats["ar_action_loss_weight"] = weight
+                step_stats["multimodal_ce"] = (
+                    multimodal_loss_sum / multimodal_count
+                    if multimodal_count > 0
+                    else 0.0
+                )
+                step_stats["ar_action_ce"] = (
+                    ar_action_loss_sum / ar_action_count
+                    if ar_action_count > 0
+                    else 0.0
+                )
+
+            if "action_accuracy" in channel_keys and tokenizer_mixin is not None:
+                accuracy_keys = [
+                    key
+                    for key in tokenizer_mixin.get_accuracy_keys()
+                    if key in channel_keys
+                ]
+                if accuracy_keys:
+                    acc_vec = torch.zeros(
+                        len(accuracy_keys), device=device, dtype=torch.float32
+                    )
+                    for idx, key in enumerate(accuracy_keys):
+                        acc_value = channel_loss_dict.get(key)
+                        if acc_value is not None:
+                            acc_vec[idx] = acc_value.detach().to(dtype=torch.float32)
+                    if dist_ready:
+                        dist.all_reduce(acc_vec, op=dist.ReduceOp.SUM)
+                        world_size = dist.get_world_size()
+                    else:
+                        world_size = 1
+                    for idx, key in enumerate(accuracy_keys):
+                        step_stats[key] = acc_vec[idx].item() / world_size
 
     def collect_param_norms(
         self, model, step_stats, device, reduce_tensor_fn, params_sharded=False
@@ -336,10 +580,10 @@ class VLAdapter(ModelAdapter):
         """Compute per-group parameter L2 norms for VL models.
 
         Groups:
-          "visual"  -> visual_param_norm
-          "action"  -> action_expert_param_norm
-          others    -> org_vlm_param_norm
-          all       -> total_param_norm
+          "visual"  → visual_param_norm
+          "action"  → action_expert_param_norm
+          others    → org_vlm_param_norm
+          all       → total_param_norm
         """
         total_sq = torch.tensor(0.0, dtype=torch.float32, device=device)
         visual_sq = torch.tensor(0.0, dtype=torch.float32, device=device)
@@ -432,6 +676,11 @@ class VLAdapter(ModelAdapter):
     def _extract_batch_info(batch):
         """Extract token counts from a training batch."""
         info = {}
+        positional_masks = batch.get("positional_masks")
+        info["packing_active"] = bool(
+            isinstance(positional_masks, dict)
+            and positional_masks.get("pack_seq_lens") is not None
+        )
         input_ids = batch.get("input_ids")
         if input_ids is not None:
             info["batch_size"] = input_ids.shape[0]
@@ -453,6 +702,16 @@ class VLAdapter(ModelAdapter):
         info["vision_seq_length"] = (
             pixel_values.shape[0] if pixel_values is not None else 0
         )
+        grid_thw = batch.get("image_grid_thw")
+        # Per-frame (t, h*w) list for exact vision-attention FLOPs: DINO runs
+        # one attention sequence PER FRAME of h*w patches (+prefix tokens),
+        # so sum(S_i^2) must come from the real grids, not a square-image
+        # heuristic (mixed 4:3 / 16:9 data makes 784-patch frames wrong).
+        info["vision_frame_hw"] = (
+            [(int(t), int(h) * int(w)) for t, h, w in grid_thw.tolist()]
+            if grid_thw is not None
+            else None
+        )
 
         labels = batch.get("labels")
         if labels is not None:
@@ -461,6 +720,44 @@ class VLAdapter(ModelAdapter):
             info["num_loss_tokens"] = None
 
         return info
+
+    @staticmethod
+    def _cfg_get(cfg, key, default=None):
+        if cfg is None:
+            return default
+        if isinstance(cfg, dict):
+            return cfg.get(key, default)
+        return getattr(cfg, key, default)
+
+    @classmethod
+    def _cfg_first(cls, configs, key, default=None):
+        for cfg in configs:
+            value = cls._cfg_get(cfg, key, _MISSING)
+            if value is not _MISSING and value is not None:
+                return value
+        return default
+
+    def _log_mfu_once(self, attr, message, *args, exc_info=False):
+        if getattr(self, attr, False):
+            return
+        setattr(self, attr, True)
+        if self.logger is not None:
+            self.logger.warning(message, *args, exc_info=exc_info)
+
+    @staticmethod
+    def _get_visual_module(model):
+        visual = getattr(model, "visual", None)
+        if visual is not None:
+            return visual
+        inner_model = getattr(model, "model", None)
+        return getattr(inner_model, "visual", None)
+
+    @classmethod
+    def _flops_config_sources(cls, model_config):
+        text_config = cls._cfg_get(model_config, "text_config")
+        vla_config = cls._cfg_get(model_config, "vla_config")
+        nested_vla_config = cls._cfg_get(text_config, "vla_config")
+        return (model_config, text_config, vla_config, nested_vla_config)
 
     def _compute_detailed_flops(self, model, config):
         """Compute detailed per-module FLOPs for one training step.
@@ -479,6 +776,8 @@ class VLAdapter(ModelAdapter):
         if model_config is None:
             return None
 
+        config_sources = self._flops_config_sources(model_config)
+
         B = batch_info["batch_size"]
         S = batch_info["seq_length"]
         num_lang = batch_info["num_lang_tokens"]
@@ -489,94 +788,324 @@ class VLAdapter(ModelAdapter):
         Nv = batch_info["vision_seq_length"]
         num_loss_tokens = batch_info["num_loss_tokens"]
 
-        H = model_config.hidden_size
-        num_layers = model_config.num_hidden_layers
-        num_heads = model_config.num_attention_heads
-        num_kv = model_config.num_key_value_heads
-        vocab_size = getattr(model_config, "padded_vocab_size", model_config.vocab_size)
+        H = self._cfg_first(config_sources, "hidden_size")
+        num_layers = self._cfg_first(config_sources, "num_hidden_layers")
+        num_heads = self._cfg_first(config_sources, "num_attention_heads")
+        num_kv = self._cfg_first(config_sources, "num_key_value_heads", num_heads)
+        vocab_size = self._cfg_first(
+            config_sources,
+            "padded_vocab_size",
+            self._cfg_first(config_sources, "vocab_size"),
+        )
+        missing = [
+            name
+            for name, value in (
+                ("hidden_size", H),
+                ("num_hidden_layers", num_layers),
+                ("num_attention_heads", num_heads),
+                ("num_key_value_heads", num_kv),
+                ("vocab_size", vocab_size),
+            )
+            if value is None
+        ]
+        if missing:
+            self._log_mfu_once(
+                "_mfu_missing_info_logged",
+                "[MFU] Skip MFU calculation: missing model config fields: %s",
+                ", ".join(missing),
+            )
+            return None
 
-        use_mot = getattr(model_config, "attention_moe", False)
-        use_moe_mlp = getattr(model_config, "mlp_moe", False)
-        dim_inputs = getattr(model_config, "dim_inputs", (H, H))
+        use_mot = self._cfg_first(
+            config_sources,
+            "attention_moe",
+            self._cfg_first(config_sources, "use_mot", False),
+        )
+        use_moe_mlp = self._cfg_first(config_sources, "mlp_moe", False)
+        dim_inputs = self._cfg_first(config_sources, "dim_inputs", (H, H))
         dim_lang, dim_act = dim_inputs
 
         grad_accum = self.cfg.hyperparams.gradient_accumulation_steps
+        opt_cfg = self.cfg.hyperparams.optimizer
+        action_expert_only = self._cfg_get(opt_cfg, "train_action_expert_only", False)
 
         vit_frozen = True
-        if hasattr(model, "visual"):
-            for p in model.visual.parameters():
+        visual_module = self._get_visual_module(model)
+        if visual_module is not None:
+            for p in visual_module.parameters():
                 if p.requires_grad:
                     vit_frozen = False
                     break
         vit_mult = 1.0 if vit_frozen else 3.0
 
         vit_fwd_flops = 0
-        if hasattr(model_config, "vision_config") and Nv > 0:
-            vcfg = model_config.vision_config
-            Hv = vcfg.hidden_size
-            Iv = vcfg.intermediate_size
-            out_hidden = vcfg.out_hidden_size
-            depth_v = vcfg.depth
-
-            F_qkv_v = 6 * Nv * Hv * Hv
-            F_o_v = 2 * Nv * Hv * Hv
-            F_mlp_v = 6 * Nv * Hv * Iv + 2 * Nv * Iv
-            F_linear_per_layer = F_qkv_v + F_o_v + F_mlp_v
-
-            fullatt_set = set(getattr(vcfg, "fullatt_block_indexes", []))
-            num_images = max(Nv // 768, 1)
-            si = Nv // num_images
-            sum_si_sq = num_images * si * si
-            sum_wi_sq = sum_si_sq // 16
-
-            for i in range(depth_v):
-                if i in fullatt_set:
-                    vit_fwd_flops += F_linear_per_layer + 4 * Hv * sum_si_sq
+        vcfg = self._cfg_get(model_config, "vision_config")
+        _dino_enc = (
+            self._cfg_get(vcfg, "encoder_config", None) if vcfg is not None else None
+        )
+        if _dino_enc is not None and Nv > 0:
+            # DINO tower: dims live in the nested encoder_config (the top-level
+            # vision_config has no hidden_size/depth, which previously hit the
+            # vision_missing path and silently dropped ALL vision FLOPs).
+            Hv = self._cfg_get(_dino_enc, "hidden_size")
+            Iv = self._cfg_get(_dino_enc, "intermediate_size")
+            depth_v = self._cfg_get(_dino_enc, "num_hidden_layers")
+            out_hidden = self._cfg_get(vcfg, "out_hidden_size")
+            if None not in (Hv, Iv, depth_v, out_hidden):
+                # Every frame carries cls + register prefix tokens through the
+                # whole encoder (qkv/mlp/attention all run on S_i = h*w + P).
+                _prefix = 1 + int(
+                    self._cfg_get(_dino_enc, "num_register_tokens", 0) or 0
+                )
+                frames = batch_info.get("vision_frame_hw")
+                if frames:
+                    # Exact per-frame accounting from image_grid_thw.
+                    Ntok = sum(t * (hw + _prefix) for t, hw in frames)
+                    _sum_si_sq = sum(t * (hw + _prefix) ** 2 for t, hw in frames)
                 else:
-                    vit_fwd_flops += F_linear_per_layer + 4 * Hv * sum_wi_sq
+                    # Fallback heuristic when the batch has no grid info:
+                    # assume square 448px frames (784 patches).
+                    _per_img = 784
+                    _n_img = max(Nv // _per_img, 1)
+                    _si = Nv // _n_img + _prefix
+                    Ntok = _n_img * _si
+                    _sum_si_sq = _n_img * _si * _si
+                F_qkv_v = 6 * Ntok * Hv * Hv
+                F_o_v = 2 * Ntok * Hv * Hv
+                F_mlp_v = 6 * Ntok * Hv * Iv + 2 * Ntok * Iv  # gated MLP
+                vit_fwd_flops = depth_v * (
+                    F_qkv_v + F_o_v + F_mlp_v + 4 * Hv * _sum_si_sq
+                )
+                # per_patch_mlp projector: Linear(Hv,out) + Linear(out,out).
+                # Prefix tokens are dropped before the projector, so Nv (pure
+                # patch count) is exact here.
+                vit_fwd_flops += (
+                    2 * Nv * Hv * out_hidden + 2 * Nv * out_hidden * out_hidden
+                )
+        if vcfg is not None and _dino_enc is None and Nv > 0:
+            Hv = self._cfg_get(vcfg, "hidden_size")
+            Iv = self._cfg_get(vcfg, "intermediate_size")
+            out_hidden = self._cfg_get(vcfg, "out_hidden_size")
+            depth_v = self._cfg_get(vcfg, "depth")
+            vision_missing = [
+                name
+                for name, value in (
+                    ("vision_config.hidden_size", Hv),
+                    ("vision_config.intermediate_size", Iv),
+                    ("vision_config.out_hidden_size", out_hidden),
+                    ("vision_config.depth", depth_v),
+                )
+                if value is None
+            ]
+            if vision_missing:
+                self._log_mfu_once(
+                    "_mfu_missing_info_logged",
+                    "[MFU] Skip vision FLOPs: missing model config fields: %s",
+                    ", ".join(vision_missing),
+                )
+            else:
+                F_qkv_v = 6 * Nv * Hv * Hv
+                F_o_v = 2 * Nv * Hv * Hv
+                # Qwen3_5VisionMLP is linear_fc1 + linear_fc2 (NON-gated,
+                # gelu): 2 matrices -> 4*N*H*I. The previous 6*N*H*I assumed a
+                # gated MLP and overstated vit MLP FLOPs by 50%.
+                F_mlp_v = 4 * Nv * Hv * Iv + Nv * Iv
+                F_linear_per_layer = F_qkv_v + F_o_v + F_mlp_v
 
-            merge_unit = getattr(vcfg, "spatial_merge_size", 2) ** 2
-            merger_hidden = Hv * merge_unit
-            Nv_merged = Nv // merge_unit
-            vit_fwd_flops += (
-                2 * Nv_merged * merger_hidden * merger_hidden
-                + 2 * Nv_merged * merger_hidden * out_hidden
+                # Exact per-entry attention from image_grid_thw (one varlen
+                # sequence of t*h*w patches per grid row; no prefix tokens in
+                # the native vit). Heuristic square-images fallback otherwise.
+                frames = batch_info.get("vision_frame_hw")
+                if frames:
+                    sum_si_sq = sum((t * hw) ** 2 for t, hw in frames)
+                else:
+                    num_images = max(Nv // 768, 1)
+                    si = Nv // num_images
+                    sum_si_sq = num_images * si * si
+                sum_wi_sq = sum_si_sq // 16
+
+                # window_size None => every layer is full attention. The json
+                # stores fullatt_block_indexes as null, which _cfg_get returns
+                # as-is -- guard with `or []` (set(None) raises).
+                window_size = self._cfg_get(vcfg, "window_size", None)
+                fullatt_set = set(
+                    self._cfg_get(vcfg, "fullatt_block_indexes", None) or []
+                )
+                for i in range(depth_v):
+                    if window_size is None or i in fullatt_set:
+                        vit_fwd_flops += F_linear_per_layer + 4 * Hv * sum_si_sq
+                    else:
+                        vit_fwd_flops += F_linear_per_layer + 4 * Hv * sum_wi_sq
+
+                merge_unit = self._cfg_get(vcfg, "spatial_merge_size", 2) ** 2
+                merger_hidden = Hv * merge_unit
+                Nv_merged = Nv // merge_unit
+                vit_fwd_flops += (
+                    2 * Nv_merged * merger_hidden * merger_hidden
+                    + 2 * Nv_merged * merger_hidden * out_hidden
+                )
+
+        text_config = self._cfg_get(model_config, "text_config", model_config)
+        head_dim = self._cfg_get(text_config, "head_dim", H // num_heads)
+        layer_types = self._cfg_get(text_config, "layer_types")
+        D_qo = num_heads * head_dim
+        D_kv = num_kv * head_dim
+
+        def _swiglu(N, d_in, d_ffn):
+            return 6 * N * d_in * d_ffn + N * d_ffn
+
+        if layer_types is not None:
+            vla_cfg = self._cfg_get(model_config, "vla_config")
+            vla_dim_inputs = self._cfg_get(vla_cfg, "dim_inputs")
+            if vla_dim_inputs is not None and len(vla_dim_inputs) >= 2:
+                dim_act = vla_dim_inputs[1]
+
+            ffn_base = self._cfg_get(text_config, "intermediate_size")
+            ffn_act = self._cfg_get(vla_cfg, "action_mlp_intermediate_size", ffn_base)
+            if ffn_base is None or ffn_act is None:
+                self._log_mfu_once(
+                    "_mfu_missing_info_logged",
+                    "[MFU] Skip MFU calculation: missing Qwen3.5 MLP hidden size",
+                )
+                return None
+
+            nkh_lin = self._cfg_get(text_config, "linear_num_key_heads", num_heads)
+            nvh_lin = self._cfg_get(text_config, "linear_num_value_heads", num_heads)
+            kd_lin = self._cfg_get(text_config, "linear_key_head_dim", head_dim)
+            vd_lin = self._cfg_get(text_config, "linear_value_head_dim", head_dim)
+            key_dim_lin = nkh_lin * kd_lin
+            val_dim_lin = nvh_lin * vd_lin
+
+            # Qwen3.5 has a base branch for all tokens and an action branch for
+            # action tokens. The attention matmul/recurrent body is shared.
+            FA_base_proj = (
+                2 * N_total * H * (D_qo * 2)
+                + 2 * N_total * H * D_kv
+                + 2 * N_total * H * D_kv
+                + 2 * N_total * D_qo * H
+            )
+            FA_act_proj = (
+                2 * N_act * dim_act * (D_qo * 2)
+                + 2 * N_act * dim_act * D_kv
+                + 2 * N_act * dim_act * D_kv
+                + 2 * N_act * D_qo * dim_act
+            )
+            FA_matmul = 4 * B * num_heads * (S**2) * head_dim
+
+            LA_base_proj = (
+                2 * N_total * H * (key_dim_lin * 2 + val_dim_lin)
+                + 2 * N_total * H * val_dim_lin
+                + 2 * N_total * H * nvh_lin * 2
+                + 2 * N_total * val_dim_lin * H
+            )
+            LA_act_proj = (
+                2 * N_act * dim_act * (key_dim_lin * 2 + val_dim_lin)
+                + 2 * N_act * dim_act * val_dim_lin
+                + 2 * N_act * dim_act * nvh_lin * 2
+                + 2 * N_act * val_dim_lin * dim_act
+            )
+            conv_kernel = self._cfg_get(text_config, "linear_conv_kernel_dim", 4)
+            LA_conv = 2 * N_total * (key_dim_lin * 2 + val_dim_lin) * conv_kernel
+            LA_recur = 4 * N_total * nvh_lin * kd_lin * vd_lin
+
+            MLP_base = _swiglu(N_total, H, ffn_base)
+            MLP_act = (
+                _swiglu(N_act, dim_act, ffn_act)
+                if use_moe_mlp
+                else _swiglu(N_act, H, ffn_base)
             )
 
-        kv_ratio = num_kv / num_heads
-        F_matmul_fwd = 4 * B * (S**2) * H
+            base_fwd = 0
+            act_fwd = 0
+            shared_matmul_fwd = 0
+            for layer_type in layer_types:
+                if layer_type == "full_attention":
+                    base_fwd += FA_base_proj + MLP_base
+                    act_fwd += FA_act_proj + MLP_act
+                    shared_matmul_fwd += FA_matmul
+                else:
+                    base_fwd += LA_base_proj + MLP_base
+                    act_fwd += LA_act_proj + MLP_act
+                    shared_matmul_fwd += LA_conv + LA_recur
 
-        if not use_mot:
-            F_attn_fwd = (
-                2 * N_total * H * H
-                + 4 * N_total * H * H * kv_ratio
-                + 2 * N_total * H * H
-                + F_matmul_fwd
-            )
+            decoder_fwd_flops = base_fwd + act_fwd + shared_matmul_fwd
         else:
-            F_attn_fwd = (
-                N_lang * dim_lang * H * (4 + 4 * kv_ratio)
-                + N_act * dim_act * H * (4 + 4 * kv_ratio)
-                + F_matmul_fwd
-            )
+            if not use_mot:
+                F_proj_fwd = (
+                    2 * N_total * H * D_qo
+                    + 2 * N_total * H * D_kv
+                    + 2 * N_total * H * D_kv
+                    + 2 * N_total * D_qo * H
+                )
+            else:
+                F_proj_fwd = N_lang * dim_lang * (
+                    2 * D_qo + 2 * D_kv + 2 * D_kv + 2 * D_qo
+                ) + N_act * dim_act * (2 * D_qo + 2 * D_kv + 2 * D_kv + 2 * D_qo)
+            F_matmul_fwd = 4 * B * num_heads * (S**2) * head_dim
 
-        if not use_moe_mlp:
-            ffn_hidden = model_config.intermediate_size
-            F_mlp_fwd = 6 * N_total * H * ffn_hidden + 2 * N_total * ffn_hidden
-        else:
-            hid_lang = model_config.experts[0]["intermediate_size"]
-            hid_act = model_config.experts[1]["intermediate_size"]
-            F_mlp_fwd = (6 * N_lang * dim_lang * hid_lang + 2 * N_lang * hid_lang) + (
-                6 * N_act * dim_act * hid_act + 2 * N_act * hid_act
-            )
+            ffn_hidden = self._cfg_first(config_sources, "intermediate_size")
+            if not use_moe_mlp:
+                if ffn_hidden is None:
+                    self._log_mfu_once(
+                        "_mfu_missing_info_logged",
+                        "[MFU] Skip MFU calculation: missing model config field: intermediate_size",
+                    )
+                    return None
+                F_mlp_fwd = _swiglu(N_total, H, ffn_hidden)
+            else:
+                experts = self._cfg_first(config_sources, "experts")
+                if experts and len(experts) >= 2:
+                    hid_lang = self._cfg_get(experts[0], "intermediate_size")
+                    hid_act = self._cfg_get(experts[1], "intermediate_size")
+                else:
+                    hid_lang = ffn_hidden
+                    hid_act = self._cfg_first(
+                        config_sources, "action_mlp_intermediate_size"
+                    )
+                if hid_lang is None or hid_act is None:
+                    self._log_mfu_once(
+                        "_mfu_missing_info_logged",
+                        "[MFU] Skip MFU calculation: missing MoE MLP hidden size",
+                    )
+                    return None
+                F_mlp_fwd = _swiglu(N_lang, dim_lang, hid_lang) + _swiglu(
+                    N_act, dim_act, hid_act
+                )
 
-        decoder_fwd_flops = num_layers * (F_attn_fwd + F_mlp_fwd)
+            F_attn_fwd = F_proj_fwd + F_matmul_fwd
+            decoder_fwd_flops = num_layers * (F_attn_fwd + F_mlp_fwd)
+            base_fwd = decoder_fwd_flops
+            act_fwd = 0
+            shared_matmul_fwd = 0
 
         N_lm = num_loss_tokens if num_loss_tokens is not None else N_total
         lm_head_fwd_flops = 2 * N_lm * H * vocab_size
 
+        if action_expert_only and layer_types is not None:
+            decoder_total_flops = (
+                2.0 * base_fwd + 3.0 * shared_matmul_fwd + 3.0 * act_fwd
+            )
+            lm_head_mult = 2.0
+        elif action_expert_only:
+            trainable_ratio = 0.0
+            if hasattr(model, "parameters"):
+                total_params = sum(p.numel() for p in model.parameters())
+                trainable_params = sum(
+                    p.numel() for p in model.parameters() if p.requires_grad
+                )
+                trainable_ratio = (
+                    trainable_params / total_params if total_params > 0 else 0.0
+                )
+            decoder_total_flops = (2.0 + trainable_ratio) * decoder_fwd_flops
+            lm_head_mult = 2.0
+        else:
+            decoder_total_flops = 3.0 * decoder_fwd_flops
+            lm_head_mult = 3.0
+
         total_flops = (
-            vit_mult * vit_fwd_flops + 3.0 * decoder_fwd_flops + 3.0 * lm_head_fwd_flops
+            vit_mult * vit_fwd_flops
+            + decoder_total_flops
+            + lm_head_mult * lm_head_fwd_flops
         ) * grad_accum
 
         return {
@@ -584,20 +1113,64 @@ class VLAdapter(ModelAdapter):
             "vit_fwd_flops": vit_fwd_flops,
             "decoder_fwd_flops": decoder_fwd_flops,
             "lm_head_fwd_flops": lm_head_fwd_flops,
+            "decoder_base_fwd": base_fwd,
+            "decoder_act_fwd": act_fwd,
+            "decoder_matmul_fwd": shared_matmul_fwd,
             "vit_mult": vit_mult,
+            "lm_head_mult": lm_head_mult,
         }
+
+    # bf16 dense peak TFLOPs by device-name substring (SXM parts; PCIe
+    # variants of H100 differ -- extend the table if those ever appear in a
+    # cluster). Matched in order; first hit wins.
+    _GPU_BF16_DENSE_PEAK_TFLOPS = (
+        ("H200", 989.0),
+        ("H800", 989.0),
+        ("H100", 989.0),
+        # "NVIDIA L20Z" is a cloud console label for an H100-class Hopper
+        # part (measured: dense bf16 matmul sustains H100-level TFLOPS,
+        # HBM ~3.3 TB/s). NOT the Ada "NVIDIA L20" (~119 TFLOPS
+        # bf16), which does not contain this substring and deliberately
+        # falls through to the loud-unknown path.
+        ("L20Z", 989.0),
+        ("A800", 312.0),
+        ("A100", 312.0),
+    )
+
+    def _gpu_bf16_peak_tflops(self):
+        """Device-adaptive peak for the MFU denominator (cached).
+
+        Unknown devices return None -- compute_mfu then reports no MFU
+        rather than a number computed against the wrong peak.
+        """
+        cached = getattr(self, "_gpu_peak_tflops_cache", False)
+        if cached is not False:
+            return cached
+        name = torch.cuda.get_device_name()
+        peak = next(
+            (tf for key, tf in self._GPU_BF16_DENSE_PEAK_TFLOPS if key in name),
+            None,
+        )
+        if peak is None:
+            print(
+                f"[MFU] unknown GPU '{name}': no bf16 peak entry, MFU disabled "
+                "(extend _GPU_BF16_DENSE_PEAK_TFLOPS)"
+            )
+        self._gpu_peak_tflops_cache = peak
+        return peak
 
     def compute_mfu(self, model, step_time_seconds):
         """Compute detailed Model FLOPs Utilization for VL transformer training."""
         if step_time_seconds <= 0:
             return None
         try:
-            config = self._build_processor_dict()
-            flops_info = self._compute_detailed_flops(model, config)
+            flops_info = self._compute_detailed_flops(model, config=None)
             if flops_info is None:
                 return None
 
-            gpu_peak_tflops = 312.0  # TODO: move to DebugConfig if needed
+            gpu_peak_tflops = self._gpu_bf16_peak_tflops()
+            if gpu_peak_tflops is None:
+                return None
             peak_flops = gpu_peak_tflops * 1e12
 
             # Data-parallel: each GPU independently processes its own micro-batch,
@@ -610,7 +1183,13 @@ class VLAdapter(ModelAdapter):
                 "mfu": mfu,
                 "flops_per_step_T": total_flops / 1e12,
             }
-        except Exception:
+        except Exception as exc:
+            self._log_mfu_once(
+                "_mfu_compute_error_logged",
+                "[MFU] Failed to compute MFU; future MFU errors are suppressed: %s",
+                exc,
+                exc_info=True,
+            )
             return None
 
     # ---- optional hooks ----

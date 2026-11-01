@@ -6,22 +6,57 @@ Launch with torchrun:
 """
 import argparse
 import dataclasses
+import json
 import logging
 import os
 import sys
-from datetime import datetime
-
 import torch
-import wandb
-
+from datetime import datetime
 from wall_x.config.loader import load_config as load_typed_config
 from wall_x.trainer.fsdp_trainer import (
     FSDPTrainer,
     cleanup_distributed,
     is_main_process,
 )
+import wandb
 
 logger = logging.getLogger(__name__)
+
+
+def _log_failure_diagnostics(trainer, device):
+    """Best-effort per-rank CUDA and last-batch diagnostics."""
+    global_rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    diagnostics = {
+        "global_rank": global_rank,
+        "local_rank": local_rank,
+        "pid": os.getpid(),
+        "hostname": os.environ.get("HOSTNAME", "<unknown>"),
+        "device": str(device),
+        "last_batch": getattr(trainer, "_last_batch_debug_context", None),
+    }
+    try:
+        properties = torch.cuda.get_device_properties(device)
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+        diagnostics["gpu"] = {
+            "name": properties.name,
+            "total_gib": total_bytes / (1024**3),
+            "free_gib": free_bytes / (1024**3),
+            "allocated_gib": torch.cuda.memory_allocated(device) / (1024**3),
+            "reserved_gib": torch.cuda.memory_reserved(device) / (1024**3),
+            "peak_allocated_gib": torch.cuda.max_memory_allocated(device)
+            / (1024**3),
+            "peak_reserved_gib": torch.cuda.max_memory_reserved(device)
+            / (1024**3),
+        }
+    except Exception as diagnostic_error:
+        diagnostics["gpu_diagnostics_error"] = (
+            f"{type(diagnostic_error).__name__}: {diagnostic_error}"
+        )
+    logger.error(
+        "[FailureDiagnostics] %s",
+        json.dumps(diagnostics, ensure_ascii=False, sort_keys=True),
+    )
 
 
 class TeeOutput:
@@ -54,8 +89,13 @@ def parse_args():
         "--fsdp_sharding_strategy",
         type=str,
         default=None,
-        choices=["full_shard", "shard_grad_op", "no_shard", "hybrid_shard"],
-        help="FSDP sharding strategy (overrides config)",
+        choices=[
+            "full_shard",
+            "shard_grad_op",
+            "hybrid_shard",
+            "_hybrid_shard_zero2",
+        ],
+        help="Legacy sharding strategy override for the active distributed backend",
     )
     parser.add_argument(
         "--debug",
@@ -117,21 +157,26 @@ def print_fsdp_config(cfg):
     if is_main_process():
         dist = cfg.distributed
         logger.info("%s", "=" * 60)
-        logger.info("FSDP Configuration:")
-        logger.info("  use_fsdp: %s", dist.use_fsdp)
+        logger.info("Distributed Configuration:")
+        logger.info("  backend: %s", dist.backend)
+        active = dist.dmuon if dist.backend == "dmuon" else dist.fsdp
+        logger.info("  sharding_strategy: %s", active.sharding_strategy)
+        logger.info("  hsdp_replicate_size: %s", active.hsdp_replicate_size)
         logger.info("%s", "=" * 60)
 
 
 def main():
     args = parse_args()
 
-    # Redirect logs to files only on the main process to avoid write races.
+    # Redirect each process to rank-qualified files to avoid cross-rank write races.
     if args.log_to_file:
         import yaml as _yaml
 
         with open(args.config, "r") as f:
             _tmp = _yaml.safe_load(f)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        global_rank = int(os.environ.get("RANK", "0"))
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         # support both old (save_path) and new (checkpoint.save_path) schema
         log_dir = _tmp.get("save_path") or _tmp.get("checkpoint", {}).get(
             "save_path", "./ckpt"
@@ -139,7 +184,10 @@ def main():
         if args.debug:
             log_dir = "./ckpt/debug"
         os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, f"training_log_{timestamp}.log")
+        log_file = os.path.join(
+            log_dir,
+            f"training_log_{timestamp}_rank{global_rank}_local{local_rank}_pid{os.getpid()}.log",
+        )
         sys.stdout = TeeOutput(log_file, mode="w")
         sys.stderr = TeeOutput(log_file.replace(".log", "_stderr.log"), mode="w")
         logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
@@ -151,6 +199,8 @@ def main():
     else:
         logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 
+    # Determinism (incl. the cublas workspace pin) is config-driven and applied
+    # in seed_all() from hyperparams.deterministic_algorithms.
     torch.cuda.init()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     device = torch.device(f"cuda:{local_rank}")
@@ -160,6 +210,7 @@ def main():
     wandb_run = setup_logger(cfg)
     print_fsdp_config(cfg)
 
+    trainer = None
     try:
         trainer = FSDPTrainer(
             train_config=cfg,
@@ -169,6 +220,7 @@ def main():
 
     except Exception as e:
         logger.exception("Training failed with error: %s", e)
+        _log_failure_diagnostics(trainer, device)
         raise
 
     finally:

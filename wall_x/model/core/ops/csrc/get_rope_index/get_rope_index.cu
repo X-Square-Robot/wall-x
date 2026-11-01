@@ -1,3 +1,4 @@
+#include "tensor_view.h"
 #undef __CUDA_NO_HALF_OPERATORS__
 #undef __CUDA_NO_HALF_CONVERSIONS__
 #undef __CUDA_NO_BFLOAT16_CONVERSIONS__
@@ -14,8 +15,6 @@
 #include <cub/cub.cuh>
 
 #include "../common/cuda_utils.h"
-#include <torch/extension.h>
-#include <c10/cuda/CUDAStream.h>
 
 namespace wallx_cuda_get_rope_index {
 
@@ -129,7 +128,7 @@ __global__ void compute_vision_counts(
 }
 
 
-// Stage 2: Preprocessing kernel - parse and analyze all vision content
+// Stage 2: Preprocessing kernel – parse and analyze all vision content
 __global__ void preprocess_vision_tokens(
     const int64_t *input_ids,            // (batch_size, seq_len)
     const int64_t *attention_mask,       // (batch_size, seq_len)
@@ -276,7 +275,7 @@ __global__ void preprocess_vision_tokens(
 }
 
 
-// Stage 3: Main kernel - compute 3D position IDs for all tokens in parallel
+// Stage 3: Main kernel – compute 3D position IDs for all tokens in parallel
 __global__ void compute_3d_positions(
     const int64_t *input_ids,                // (batch_size, seq_len)
     const int64_t *attention_mask,           // (batch_size, seq_len)
@@ -284,8 +283,8 @@ __global__ void compute_3d_positions(
     const int64_t *vision_counts,            // (batch_size,)
     const int64_t *text_lengths,             // (batch_size, MAX_VISION_TOKENS+1)
     const int64_t *position_offsets,         // (batch_size, MAX_VISION_TOKENS+1)
-    int64_t *position_ids,                   // (3, batch_size, seq_len) - output 3D position IDs
-    int64_t *mrope_deltas,                   // (batch_size,) - RoPE length adjustment
+    int64_t *position_ids,                   // (3, batch_size, seq_len) — output 3D position IDs
+    int64_t *mrope_deltas,                   // (batch_size,) — RoPE length adjustment
     const int64_t batch_size,
     const int64_t seq_len,
     const float tokens_per_second)
@@ -443,7 +442,7 @@ __global__ void compute_3d_positions(
 // Fallback kernel when no vision tokens exist: assign sequential positions based on attention mask
 __global__ void compute_3d_positions_mask_text(
     const int64_t* __restrict__ attention_mask,   // (batch_size, seq_len)
-    int64_t* __restrict__ position_ids,           // (3, batch_size, seq_len) - flattened row-major
+    int64_t* __restrict__ position_ids,           // (3, batch_size, seq_len) — flattened row-major
     int64_t* __restrict__ mrope_deltas,           // (batch_size,)
     const int64_t batch_size,
     const int64_t seq_len
@@ -466,7 +465,7 @@ __global__ void compute_3d_positions_mask_text(
     int64_t total_valid = 0;
 
     // Compute prefix sum (cumulative count of valid tokens)
-    // Simple O(seq_len^2) per-thread loop - acceptable for moderate seq_len
+    // Simple O(seq_len^2) per-thread loop — acceptable for moderate seq_len
     for (int idx = tid; idx < seq_len; idx += blockDim.x) {
         int64_t sum = 0;
         for (int i = 0; i <= idx; ++i) {
@@ -511,7 +510,7 @@ __global__ void arange_3d(int64_t seq_len,
         return;
     }
 
-    // Flatten index: (dim, batch, token) -> linear
+    // Flatten index: (dim, batch, token) → linear
     int64_t idx = i * gridDim.y * seq_len + j * seq_len + k;
     out[idx] = k;
 }
@@ -525,14 +524,14 @@ __global__ void fill_zeros_1d(int64_t numel, int64_t* data) {
 }
 
 // Compute required workspace size (in bytes)
-int64_t GetRopeIndexGetWorkSpace(const c10::optional<at::Tensor>& input_ids,
-    const c10::optional<at::Tensor>& image_grid_thw,
-    const c10::optional<at::Tensor>& video_grid_thw) {
+int64_t GetRopeIndexGetWorkSpace(const wallx_cuda::OptionalTensorView input_ids,
+    const wallx_cuda::OptionalTensorView image_grid_thw,
+    const wallx_cuda::OptionalTensorView video_grid_thw) {
 
     if (!image_grid_thw.has_value() && !video_grid_thw.has_value()) {
         return 1; // minimal workspace
     } else {
-        const at::Tensor& input_ids_tensor = input_ids.value();
+        wallx_cuda::TensorView input_ids_tensor = input_ids.value();
         const int batch_size = input_ids_tensor.size(0);
         return (batch_size * MAX_VISION_TOKENS * static_cast<int64_t>(sizeof(VisionDescriptor)) +
             3 * batch_size * sizeof(int64_t) +
@@ -541,14 +540,14 @@ int64_t GetRopeIndexGetWorkSpace(const c10::optional<at::Tensor>& input_ids,
 }
 
 // Main entry function: compute RoPE position IDs and mRoPE deltas
-void GetRopeIndex(const c10::optional<at::Tensor>& input_ids,
-    const c10::optional<at::Tensor>& image_grid_thw,
-    const c10::optional<at::Tensor>& video_grid_thw,
-    const c10::optional<at::Tensor>& second_per_grid_ts,
-    const c10::optional<at::Tensor>& attention_mask,
-    const at::Tensor& position_ids,
-    const at::Tensor& mrope_deltas,
-    const at::Tensor& workspace,
+void GetRopeIndex(const wallx_cuda::OptionalTensorView input_ids,
+    const wallx_cuda::OptionalTensorView image_grid_thw,
+    const wallx_cuda::OptionalTensorView video_grid_thw,
+    const wallx_cuda::OptionalTensorView second_per_grid_ts,
+    const wallx_cuda::OptionalTensorView attention_mask,
+    wallx_cuda::TensorView position_ids,
+    wallx_cuda::TensorView mrope_deltas,
+    wallx_cuda::TensorView workspace,
     int spatial_merge_size,
     int image_token_id,
     int video_token_id,
@@ -557,9 +556,9 @@ void GetRopeIndex(const c10::optional<at::Tensor>& input_ids,
 
     ASSERT_CHECK(input_ids.has_value());
 
-    const at::Tensor& input_ids_tensor = input_ids.value();
-    ASSERT_CHECK(input_ids_tensor.dim() == 2);
-    ASSERT_CHECK(input_ids_tensor.is_contiguous());
+    wallx_cuda::TensorView input_ids_tensor = input_ids.value();
+    ASSERT_CHECK(input_ids_tensor.ndim() == 2);
+    ASSERT_CHECK(input_ids_tensor.IsContiguous());
 
     const auto batch_size = input_ids_tensor.size(0);
     const auto seq_len = input_ids_tensor.size(1);
@@ -570,42 +569,42 @@ void GetRopeIndex(const c10::optional<at::Tensor>& input_ids,
     const int64_t *attention_mask_ptr = nullptr;
 
     if (attention_mask.has_value()) {
-        const at::Tensor& attention_mask_tensor = attention_mask.value();
-        ASSERT_CHECK(attention_mask_tensor.is_contiguous());
+        wallx_cuda::TensorView attention_mask_tensor = attention_mask.value();
+        ASSERT_CHECK(attention_mask_tensor.IsContiguous());
         attention_mask_ptr = static_cast<const int64_t*>(attention_mask_tensor.data_ptr());
     }
 
     const int64_t *image_grid_thw_ptr = nullptr;
 
     if (image_grid_thw.has_value()) {
-        const at::Tensor& image_grid_thw_tensor = image_grid_thw.value();
-        ASSERT_CHECK(image_grid_thw_tensor.dim() == 2 && image_grid_thw_tensor.size(1) == 3);
-        ASSERT_CHECK(image_grid_thw_tensor.is_contiguous());
+        wallx_cuda::TensorView image_grid_thw_tensor = image_grid_thw.value();
+        ASSERT_CHECK(image_grid_thw_tensor.ndim() == 2 && image_grid_thw_tensor.size(1) == 3);
+        ASSERT_CHECK(image_grid_thw_tensor.IsContiguous());
         image_grid_thw_ptr = static_cast<const int64_t*>(image_grid_thw_tensor.data_ptr());
     }
 
     const int64_t *video_grid_thw_ptr = nullptr;
 
     if (video_grid_thw.has_value()) {
-        const at::Tensor& video_grid_thw_tensor = video_grid_thw.value();
-        ASSERT_CHECK(video_grid_thw_tensor.is_contiguous());
-        ASSERT_CHECK(video_grid_thw_tensor.dim() == 2 && video_grid_thw_tensor.size(1) == 3);
+        wallx_cuda::TensorView video_grid_thw_tensor = video_grid_thw.value();
+        ASSERT_CHECK(video_grid_thw_tensor.IsContiguous());
+        ASSERT_CHECK(video_grid_thw_tensor.ndim() == 2 && video_grid_thw_tensor.size(1) == 3);
         video_grid_thw_ptr = static_cast<const int64_t*>(video_grid_thw_tensor.data_ptr());
     }
 
     const float *second_per_grid_ts_ptr = nullptr;
 
     if (second_per_grid_ts.has_value()) {
-        const at::Tensor& second_per_grid_ts_tensor = second_per_grid_ts.value();
-        ASSERT_CHECK(second_per_grid_ts_tensor.is_contiguous());
-        ASSERT_CHECK(second_per_grid_ts_tensor.dim() == 1);
+        wallx_cuda::TensorView second_per_grid_ts_tensor = second_per_grid_ts.value();
+        ASSERT_CHECK(second_per_grid_ts_tensor.IsContiguous());
+        ASSERT_CHECK(second_per_grid_ts_tensor.ndim() == 1);
         second_per_grid_ts_ptr = static_cast<const float*>(second_per_grid_ts_tensor.data_ptr());
     }
 
     cudaStream_t stream = static_cast<cudaStream_t>(
-        at::cuda::getCurrentCUDAStream().stream());
+        wallx_cuda::CurrentStream(position_ids.device().device_type, position_ids.device().device_id));
 
-    // Case: no vision tokens -> use simple positional encoding
+    // Case: no vision tokens → use simple positional encoding
     if (!image_grid_thw.has_value() && !video_grid_thw.has_value()) {
         if (attention_mask.has_value()) {
             // Use attention mask to compute valid positions
@@ -619,7 +618,7 @@ void GetRopeIndex(const c10::optional<at::Tensor>& input_ids,
             );
             return;
         } else {
-            // No mask, no vision -> use simple arange
+            // No mask, no vision → use simple arange
             dim3 thread_num(256);
             dim3 grid(3, batch_size, (seq_len + 255) / 256);
             arange_3d<<<grid, thread_num, 0, stream>>>(seq_len, static_cast<int64_t*>(position_ids.data_ptr()));
@@ -687,6 +686,6 @@ void GetRopeIndex(const c10::optional<at::Tensor>& input_ids,
 
 } // wallx_cuda_get_rope_index
 
-// TVM FFI exports
-// Removed TVM FFI export (see pybind11 registration)
-// Removed TVM FFI export (see pybind11 registration)
+// Exported operators (registered in binding.cu)
+
+

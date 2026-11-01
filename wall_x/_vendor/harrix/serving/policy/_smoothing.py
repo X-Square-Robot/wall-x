@@ -14,7 +14,7 @@ from typing import List, Optional, Sequence
 import numpy as np
 import torch
 
-from wall_x._vendor.harrix.serving._wallx_infer.base_dataclass import dof_dims
+from wall_x._vendor.harrix.infer.base_dataclass import dof_dims
 
 
 def _laplacian_smooth(a: np.ndarray, lam: float = 1.0, iters: int = 30) -> np.ndarray:

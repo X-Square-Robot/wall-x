@@ -26,7 +26,7 @@ model:
   flow_loss_weight: 1.0
   enable_customized_robot_config: true
   customized_robot_config:
-    name: your_robot
+    name: physical-intelligence/aloha
     customized_dof_config:
       action: 7
     customized_agent_pos_config:

@@ -4,7 +4,6 @@ import logging
 from typing import List
 
 import torch
-
 from wall_x.model.core.ops.base import OpsProxy
 
 logger = logging.getLogger(__name__)
@@ -81,13 +80,95 @@ class RoPEOp(OpsProxy):
             k_embed = k_embed.to(k.dtype)
         return q_embed, k_embed
 
+    def full(self, q, k, cos, sin, interleave=False, rotary_dim=None):
+        """Partial-rotary RoPE that also emits the pass-through part.
+
+        Fuses the rotary-prefix rotation and the pass-through copy into a single
+        external_accel kernel, avoiding the Python-side ``torch.cat([rotated, pass])``.
+        q/k are the FULL head tensors ([..., head_dim]); cos/sin are the compact
+        half-dim (rotary_dim // 2). Falls back to slice + rope + cat when the
+        external_accel ``.full`` kernel is unavailable.
+        See docs qwen35_mfu_report (RoPE full fused kernel).
+        """
+        if self._resolved_fn is None:
+            self._resolve()
+        # external_accel rope_full fuses the rotary-prefix rotation and pass-through
+        # copy into one kernel. Verified numerically equal to a pure-PyTorch
+        # partial-rotary reference (bf16 tolerance). Used whenever the loaded
+        # backend provides .full. See docs qwen35_mfu_report (RoPE full).
+        use_external_accel_full = hasattr(self._resolved_fn, "full")
+        if use_external_accel_full:
+            try:
+                return self._resolved_fn.full(
+                    q, k, cos, sin, interleave=interleave, rotary_dim=rotary_dim
+                )
+            except Exception as exc:
+                logger.warning(
+                    "RoPEOp.full: external_accel path failed (%s); using PyTorch fallback",
+                    exc,
+                )
+        return self._pytorch_full_fallback(
+            q, k, cos, sin, interleave=interleave, rotary_dim=rotary_dim
+        )
+
+    def _pytorch_full_fallback(self, q, k, cos, sin, interleave=False, rotary_dim=None):
+        if rotary_dim is None:
+            rotary_dim = cos.size(-1) * 2
+        q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+        k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+        q_embed, k_embed = self(q_rot, k_rot, cos, sin, interleave=interleave)
+        q_embed = torch.cat([q_embed, q_pass], dim=-1)
+        k_embed = torch.cat([k_embed, k_pass], dim=-1)
+        return q_embed, k_embed
+
     def pack(self, *args, **kwargs):
-        """Delegate to resolved backend's pack method if available."""
+        """Apply RoPE to packed qkv through the selected backend.
+
+        Callers rely on three contracts a bare ``return args`` breaks: some use
+        the return value directly (qwen3_5 vision), some truth-test it
+        (qwen2_5 vision), and the infer paths ignore the return and rely on the
+        in-place q/k writes. The fallback must therefore apply RoPE in place
+        and return the qkv tensor.
+        """
         if self._resolved_fn is None:
             self._resolve()
         if hasattr(self._resolved_fn, "pack"):
             return self._resolved_fn.pack(*args, **kwargs)
-        return args
+        return self._pytorch_pack_fallback(*args, **kwargs)
+
+    def _pytorch_pack_fallback(
+        self, qkv, q_num_heads, kv_num_heads, cos, sin, interleave=False, **kwargs
+    ):
+        if qkv.dim() != 2:
+            raise ValueError(f"Expected packed qkv to be 2D, got {qkv.dim()}D")
+        if qkv.stride(-1) != 1:
+            raise ValueError("Expected packed qkv last dimension to have stride 1")
+        if cos.dtype != torch.float32 or sin.dtype != torch.float32:
+            raise ValueError("Expected rope cos/sin to be float32")
+        if not cos.is_contiguous() or not sin.is_contiguous():
+            raise ValueError("Expected rope cos/sin to be contiguous")
+
+        head_dim = cos.size(-1) * 2
+        q_dim = q_num_heads * head_dim
+        kv_dim = kv_num_heads * head_dim
+        if qkv.size(-1) != q_dim + 2 * kv_dim:
+            raise ValueError(
+                f"Expected packed qkv last dim {q_dim + 2 * kv_dim}, got {qkv.size(-1)}"
+            )
+
+        q = qkv[..., :q_dim].view(*qkv.shape[:-1], q_num_heads, head_dim)
+        k = qkv[..., q_dim : q_dim + kv_dim].view(
+            *qkv.shape[:-1], kv_num_heads, head_dim
+        )
+
+        if qkv.dim() == 2 and cos.dim() == 3 and cos.shape[0] == 1:
+            cos = cos.squeeze(0)
+            sin = sin.squeeze(0)
+
+        q_embed, k_embed = self._pytorch_fallback(q, k, cos, sin, interleave=interleave)
+        q.copy_(q_embed)
+        k.copy_(k_embed)
+        return qkv
 
 
 class MRoPEOp(OpsProxy):
@@ -151,12 +232,43 @@ class MRoPEOp(OpsProxy):
         return q_embed.to(query_states.dtype), k_embed.to(key_states.dtype)
 
     def pack(self, *args, **kwargs):
-        """Delegate to resolved backend's pack method if available."""
+        """Apply MRoPE to packed qkv through the selected backend.
+
+        See RoPEOp.pack: the infer kvcache path ignores the return value and
+        relies on the in-place q/k writes, so the fallback must apply MRoPE in
+        place rather than return the raw args.
+        """
         if self._resolved_fn is None:
             self._resolve()
         if hasattr(self._resolved_fn, "pack"):
             return self._resolved_fn.pack(*args, **kwargs)
-        return args
+        return self._pytorch_pack_fallback(*args, **kwargs)
+
+    def _pytorch_pack_fallback(
+        self, qkv, q_num_heads, kv_num_heads, cos, sin, mrope_section, **kwargs
+    ):
+        if qkv.dim() != 3:
+            raise ValueError(f"Expected packed qkv to be 3D, got {qkv.dim()}D")
+        if qkv.stride(-1) != 1:
+            raise ValueError("Expected packed qkv last dimension to have stride 1")
+
+        head_dim = sum(mrope_section) * 2
+        q_dim = q_num_heads * head_dim
+        kv_dim = kv_num_heads * head_dim
+        if qkv.size(-1) != q_dim + 2 * kv_dim:
+            raise ValueError(
+                f"Expected packed qkv last dim {q_dim + 2 * kv_dim}, got {qkv.size(-1)}"
+            )
+
+        q = qkv[..., :q_dim].view(*qkv.shape[:-1], q_num_heads, head_dim)
+        k = qkv[..., q_dim : q_dim + kv_dim].view(
+            *qkv.shape[:-1], kv_num_heads, head_dim
+        )
+
+        q_embed, k_embed = self._pytorch_fallback(q, k, cos, sin, mrope_section)
+        q.copy_(q_embed)
+        k.copy_(k_embed)
+        return qkv
 
 
 class RotPosEmbOp(OpsProxy):
@@ -180,7 +292,12 @@ class RotPosEmbOp(OpsProxy):
             logger.warning("RotPosEmbOp: CUDA kernel load failed: %s", e)
             return None
 
-    def _pytorch_fallback(self, inv_freq, grid_thw, spatial_merge_size):
+    def _pytorch_fallback(
+        self, inv_freq, grid_thw, spatial_merge_size, total_output_tokens=None
+    ):
+        # total_output_tokens lets the external_accel backend skip a GPU->CPU sync;
+        # the PyTorch fallback derives sizes from grid_thw directly.
+        del total_output_tokens
         if inv_freq.dtype != torch.float32:
             inv_freq = inv_freq.to(torch.float32)
         pos_ids = []

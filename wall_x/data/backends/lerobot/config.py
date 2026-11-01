@@ -1,7 +1,11 @@
-from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
-
-from qwen_vl_utils.vision_process import IMAGE_FACTOR, MAX_PIXELS, MIN_PIXELS
+from dataclasses import dataclass, field
+try:
+    from qwen_vl_utils.vision_process import IMAGE_FACTOR, MAX_PIXELS, MIN_PIXELS
+except ImportError:  # qwen_vl_utils >= 0.0.12 dropped the Qwen2.5-VL defaults.
+    IMAGE_FACTOR = 28
+    MIN_PIXELS = 4 * 28 * 28
+    MAX_PIXELS = 16384 * 28 * 28
 
 
 @dataclass
@@ -36,6 +40,10 @@ class LerobotConfig:
     image_factor: int = IMAGE_FACTOR
 
     generate_subtask_ratio: float = 0.0
+
+    # Prompt text; None keeps the default system prompt.
+    system_prompt: Optional[str] = None
+    instruction_label: str = "Instruction"
 
     def __post_init__(self):
         """Post-initialization validation and setup."""
@@ -125,6 +133,8 @@ class LerobotConfig:
             "image_factor": get("image_factor", IMAGE_FACTOR),
             # Subtask generation ratio
             "generate_subtask_ratio": get("generate_subtask_ratio", 0.0),
+            "system_prompt": get("system_prompt", None),
+            "instruction_label": get("instruction_label", "Instruction"),
         }
 
         # Keep only valid dataclass fields (ignore unknown YAML keys)

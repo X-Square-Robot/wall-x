@@ -1,0 +1,88 @@
+# Wall-X Qwen3.5-2B dual-arm desktop config (flow inference / serving).
+#
+# Pass this file as --train-config-path to scripts/run_serving.sh together with
+# a Qwen3.5-2B desktop checkpoint. dof_config, agent_pos_config, image sizes,
+# and the prompt text below must match how the checkpoint was trained.
+model_type: qwen3_5
+
+task:
+  dof_config:
+    master_left_ee_cartesian_pos_relative: 3
+    master_left_ee_rotation_6D_relative: 6
+    master_left_gripper: 1
+    master_right_ee_cartesian_pos_relative: 3
+    master_right_ee_rotation_6D_relative: 6
+    master_right_gripper: 1
+    velocity_decomposed: 3
+    height: 1
+    head_actions: 2
+  agent_pos_config:
+    follow_left_ee_cartesian_pos: 3
+    follow_left_ee_rotation_6D: 6
+    follow_left_gripper: 1
+    follow_right_ee_cartesian_pos: 3
+    follow_right_ee_rotation_6D: 6
+    follow_right_gripper: 1
+    velocity_decomposed: 3
+    height: 1
+    head_actions: 2
+  action_horizon: 32
+  action_horizon_flow: 32
+  use_state_string_representation: true
+
+model:
+  backbone: qwen3_5
+  config_path: workspace/models_config/qwen3_5_2B_mot.json
+  processor_path: Qwen/Qwen3.5-2B
+  pretrained_path: null
+  use_ema: false
+  flow_loss_weight: 1.0
+  new_special_tokens: ["<point>", "</point>", "<box>", "</box>"]
+
+hyperparams:
+  num_epoch: 1
+  batch_size_per_gpu: 1
+  optimizer:
+    optimizer_type: adamw
+    learning_rate: 1.0e-5
+
+distributed:
+  use_fsdp: true
+  bf16: true
+
+data:
+  dataset_type: lerobot
+  lerobot_config:
+    repo_id: /path/to/your/lerobot_dataset
+    root: null
+  # Deltas are added in the robot base frame; use `body` for checkpoints
+  # trained on deltas expressed in the current gripper frame.
+  relative_action_frame: base
+  use_relative_action: true
+  resolution:
+    face_view: 224
+    left_wrist_view: 224
+    right_wrist_view: 224
+  image_factor: 32
+  min_pixels: 4096
+  max_pixels: 16777216
+  state_bins: 256
+  max_seq_length: 780
+  padding_side: right
+  train_test_split: 0.95
+  # Prompt text used for both LeRobot training and inference. Omit both keys
+  # for the default "You are a helpful assistant." / "Instruction:" prompt.
+  instruction_label: Task
+  system_prompt: |
+    You are an embodied vision-language-action (VLA) model controlling the robot with language instructions.
+     Embodiment: X2 Desktop
+     Camera Setup: front view, left wrist view, right wrist view,
+     Frequency: 32HZ
+     Action Space: Rel EEF
+
+logging:
+  log_name: wallx_qwen3_5_2B_desktop
+  use_wandb: false
+
+checkpoint:
+  save_path: /path/to/output/checkpoints

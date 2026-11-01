@@ -165,14 +165,36 @@ class ActionProcessor(nn.Module):
 
             # 1. add noise to action_chunk
             noise = torch.randn_like(action_chunk)
-            time_expanded = sample_time.unsqueeze(-1).unsqueeze(-1)
+            if sample_time.dim() == 1:
+                per_token_time = False
+                time_expanded = sample_time.unsqueeze(-1).unsqueeze(-1)
+            elif sample_time.dim() == 2:
+                per_token_time = True
+                if sample_time.shape != action_chunk.shape[:2]:
+                    raise ValueError(
+                        "`sample_time` with shape [B, T] must match "
+                        f"`action_chunk` prefix shape {tuple(action_chunk.shape[:2])}, "
+                        f"got {tuple(sample_time.shape)}."
+                    )
+                time_expanded = sample_time.unsqueeze(-1)
+            else:
+                raise ValueError(
+                    "`sample_time` must have shape [B] or [B, T], "
+                    f"got {tuple(sample_time.shape)}."
+                )
             noisy_action = (
                 1 - time_expanded
             ) * noise + time_expanded * action_chunk  # denoise from 0 to 1; integration does not need a negative sign
             flow = action_chunk - noise  # used to compute loss
 
             # 2. sinusoidal positional encoding for timesteps
-            time_embed = self.time_embed(sample_time).to(torch.float32)
+            if per_token_time:
+                time_embed = self.time_embed(sample_time.reshape(-1)).reshape(
+                    sample_time.shape[0], sample_time.shape[1], -1
+                )
+            else:
+                time_embed = self.time_embed(sample_time)
+            time_embed = time_embed.to(torch.float32)
 
             self.noise = noise
             self.noisy_action = noisy_action  # for new x-pred
@@ -186,6 +208,11 @@ class ActionProcessor(nn.Module):
             self.time_expanded = time_expanded  # for new x-pred
 
             if not self.config.use_adarms:
+                if per_token_time:
+                    raise NotImplementedError(
+                        "Per-token `sample_time` is only supported when "
+                        "`use_adarms=True`."
+                    )
                 time_embed = (
                     time_embed.unsqueeze(1)
                     .repeat(1, action_embed.shape[1], 1)
@@ -196,6 +223,7 @@ class ActionProcessor(nn.Module):
                 action_time_embed = self.w3(self.act_fn(concat_embed))
                 adarms_cond = None
             else:
+                time_embed = time_embed.to(dtype=self.time_mlp_in.weight.dtype)
                 time_embed = self.time_mlp_in(time_embed)
                 time_embed = self.act_fn(time_embed)
                 time_embed = self.time_mlp_out(time_embed)

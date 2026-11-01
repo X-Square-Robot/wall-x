@@ -46,6 +46,25 @@ class BaseEnv(ABC):
           - norm_key:   str
         """
 
+    @classmethod
+    def encode_observation(cls, raw_obs: dict) -> dict:
+        """Encode a raw env observation into the adapter payload bundle.
+
+        Defaults to identity. Envs may override either to build the bundle here
+        (LIBERO) or to keep identity because the bundle was already packed during
+        reset/execute (RobotWin).
+        """
+        return raw_obs
+
+    @classmethod
+    def max_infer_rounds(cls, cfg: EvalConfig) -> int:
+        """Max model chunks per episode for the chunk-level (in-process) driver.
+
+        Distinct from the instance-level ``_max_infer_rounds`` used by the
+        ``run_episode`` loop; envs targeting the in-process driver override this.
+        """
+        return 1
+
     # ---- chunk-level primitives ----
 
     @abstractmethod
@@ -79,8 +98,6 @@ class BaseEnv(ABC):
         """
         import time
 
-        from wall_x._vendor.harrix.envs.libero_common import encode_raw_obs
-
         t_ep_start = time.time()
         initial = self.reset_episode(ep_id)
         obs = initial["obs"]
@@ -91,7 +108,7 @@ class BaseEnv(ABC):
         success = False
         steps_total = 0
         for round_idx in range(max_rounds):
-            encoded = encode_raw_obs(obs)
+            encoded = self.encode_observation(obs)
             chunk = predict(encoded, instruction, round_idx)
             result = self.execute_chunk(chunk)
             obs = result["obs"]
@@ -100,16 +117,12 @@ class BaseEnv(ABC):
                 success = True
                 break
 
-        self.finalize_episode(success)
         return {
             "success": bool(success),
             "steps": steps_total,
             "elapsed_sec": round(time.time() - t_ep_start, 3),
             "task_desc": task_desc,
         }
-
-    def finalize_episode(self, success: bool) -> None:
-        """Hook for env-specific cleanup after an episode (e.g. save rollouts)."""
 
     def _max_infer_rounds(self) -> int:
         """Return the maximum number of model chunks for one episode."""

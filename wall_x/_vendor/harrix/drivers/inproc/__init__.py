@@ -15,12 +15,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import time
 
-import numpy as np
-
 from wall_x._vendor.harrix.eval_config import EvalConfig
-from wall_x._vendor.harrix.drivers.inproc.env_handle import SubprocEnvHandle
+from wall_x._vendor.harrix.drivers.inproc.env_handle import DirectEnvHandle, SubprocEnvHandle
 from wall_x._vendor.harrix.drivers.inproc.model_handle import DirectModelHandle
 from wall_x._vendor.harrix.drivers.job_state import JobState
 
@@ -28,10 +27,13 @@ logger = logging.getLogger(__name__)
 
 
 def run(cfg: EvalConfig) -> None:
+    from wall_x._vendor.harrix.utils.seed import set_seed_everywhere
+
+    cfg.runtime.log_dir = os.path.abspath(cfg.runtime.log_dir)
+
     import wall_x._vendor.harrix.envs  # noqa: F401  trigger env register
     import wall_x._vendor.harrix.adapters  # noqa: F401  trigger adapter register
     from wall_x._vendor.harrix.envs.registry import enumerate_episodes_for
-    from wall_x._vendor.harrix.utils.seed import set_seed_everywhere
 
     # 1) Seed the driver process.
     set_seed_everywhere(cfg.env.seed)
@@ -42,156 +44,176 @@ def run(cfg: EvalConfig) -> None:
     model_handle = DirectModelHandle(cfg)
     logger.info("Model loaded in %.1fs", time.time() - t_model)
 
-    # 3) Start env subprocesses.
-    logger.info("Starting %s SubprocEnvHandle(s)", cfg.runtime.num_workers)
+    # 3) Start env handles: inline in the driver process (DirectEnvHandle) or in
+    #    spawned subprocesses (SubprocEnvHandle).
+    env_handle_cls = DirectEnvHandle if cfg.runtime.inline_env else SubprocEnvHandle
+    logger.info(
+        "Starting %s %s(s)", cfg.runtime.num_workers, env_handle_cls.__name__
+    )
     env_handles = [
-        SubprocEnvHandle(cfg, worker_id=i) for i in range(cfg.runtime.num_workers)
+        env_handle_cls(cfg, worker_id=i) for i in range(cfg.runtime.num_workers)
     ]
+    completed_ok = False
 
-    # 4) JobState runs in frame-sync mode for lockstep evaluation.
+    # 4) JobState in FIFO mode: a worker claims the next pending episode the
+    #    instant it finishes, so the inference batch stays full (continuous
+    #    batching) instead of collapsing onto the slowest episode of a lockstep
+    #    frame. This is what makes batched inference actually pay off.
     os.makedirs(cfg.runtime.log_dir, exist_ok=True)
     log_path = os.path.join(cfg.runtime.log_dir, "state.jsonl")
     report_path = os.path.join(cfg.runtime.log_dir, "report.json")
     episodes = enumerate_episodes_for(cfg)
     logger.info("env.type=%r; scheduled %s episodes", cfg.env.type, len(episodes))
-    state = JobState(
-        episodes,
-        log_path,
-        batch_sync_mode=True,
-        batch_size=cfg.runtime.num_workers,
-    )
+    state = JobState(episodes, log_path, batch_sync_mode=False)
 
-    # 5) Main loop, one frame at a time.
-    t0 = time.time()
-    frame_idx = 0
-    while not state.is_drained():
-        frame_eps = state.claim_frame()
-        if not frame_eps:
-            # Previous frame still has in-flight episodes.
-            time.sleep(0.05)
-            continue
+    try:
+        # 5) Continuous-batching main loop.
+        t0 = time.time()
+        _run_continuous(state, model_handle, env_handles, cfg)
 
-        results = _run_frame(frame_eps, model_handle, env_handles, cfg, frame_idx)
-        for ep, res in zip(frame_eps, results):
-            if "_error" in res:
-                state.fail(ep, str(res["_error"]))
-            else:
-                state.complete(ep, res)
-        frame_idx += 1
+        elapsed = time.time() - t0
+        logger.info(
+            "All episodes finished in %.1fs (%.1f min)", elapsed, elapsed / 60
+        )
 
-    elapsed = time.time() - t0
-    logger.info("All episodes finished in %.1fs (%.1f min)", elapsed, elapsed / 60)
-
-    state.dump_final(report_path)
-    with open(report_path) as f:
-        report = json.load(f)
-    overall = report["overall"]
-    logger.info(
-        "attempted=%s, successes=%s, success_rate=%.2f%%, failed=%s",
-        overall["attempted"],
-        overall["successes"],
-        overall["success_rate"] * 100,
-        overall["failed"],
-    )
-    logger.info("Report: %s", report_path)
-    logger.info("State log: %s", log_path)
-
-    for h in env_handles:
-        h.shutdown()
-    model_handle.shutdown()
+        state.dump_final(report_path)
+        with open(report_path) as f:
+            report = json.load(f)
+        overall = report["overall"]
+        logger.info(
+            "attempted=%s, successes=%s, success_rate=%.2f%%, failed=%s",
+            overall["attempted"],
+            overall["successes"],
+            overall["success_rate"] * 100,
+            overall["failed"],
+        )
+        logger.info("Report: %s", report_path)
+        logger.info("State log: %s", log_path)
+        # Exit non-zero when any episode errored (crash/infra), so an
+        # orchestrator can distinguish a degraded shard from a genuinely low
+        # score. Plain task failures (completed, success=False) keep exit 0.
+        exit_code = 0 if overall["failed"] == 0 else 1
+        completed_ok = True
+    finally:
+        for h in env_handles:
+            h.shutdown()
+        model_handle.shutdown()
 
 
-def _run_frame(
-    frame_eps: list,
+def _run_continuous(
+    state: JobState,
     model_handle: DirectModelHandle,
     env_handles: list,
     cfg: EvalConfig,
-    frame_idx: int,
-) -> list[dict]:
-    """Run one task-local frame with chunk-level lockstep.
+) -> None:
+    """Continuous-batching scheduler.
 
-    Active workers are batched together at each chunk boundary. Workers that
-    already finished no longer participate in later forwards.
+    Every env worker is kept busy: the instant a worker finishes its episode it
+    claims the next pending one, so the inference batch stays ~num_workers wide
+    until the queue drains. This is the key difference from the old lockstep
+    frame path, whose batch collapsed to 1 whenever one episode outran the rest.
+
+    A just-finished worker's reset (submit_reset) is issued *before* the active
+    batch and its completion is collected *after* the batch's predict+execute, so
+    the expensive expert-filter reset overlaps inference instead of stalling it.
+
+    Requires the env to accept episodes of different tasks across resets when the
+    schedule mixes tasks (see RoboTwinRobotEnv multi-task support).
     """
-    from wall_x._vendor.harrix.envs.libero_common import encode_raw_obs
+    from wall_x._vendor.harrix.envs.registry import encode_observation_for, max_infer_rounds_for
 
-    n = len(frame_eps)
-    t_frame_start = time.time()
+    n = len(env_handles)
+    max_rounds = max_infer_rounds_for(cfg)
 
-    # ---- a) reset: fan out, then gather ----
-    for i in range(n):
-        env_handles[i].submit_reset(tuple(frame_eps[i]))
-    initials = [env_handles[i].wait_reset() for i in range(n)]
-
-    obs_list = [r["obs"] for r in initials]
-    instr_list = [r["instruction"] for r in initials]
-    status = [
-        {
-            "done": False,
-            "success": False,
-            "steps": 0,
-            "task_desc": initials[i].get("task_desc", ""),
+    def _blank():
+        return {
+            "ep": None, "obs": None, "instr": "", "steps": 0, "rounds": 0,
+            "task_desc": "", "phase": "idle",
         }
-        for i in range(n)
-    ]
 
-    max_rounds = cfg.env.libero.max_infer_times
+    W = [_blank() for _ in range(n)]
+    t_last = time.time()
+    done_count = 0
 
-    # ---- b) chunk lockstep ----
-    for round_idx in range(max_rounds):
-        active = [i for i in range(n) if not status[i]["done"]]
-        if not active:
-            break
+    def _finish(i: int, success: bool, error: str | None = None) -> None:
+        nonlocal done_count
+        w = W[i]
+        res = {"success": bool(success), "steps": w["steps"], "task_desc": w["task_desc"]}
+        if error is not None:
+            res["_error"] = error
+            state.fail(w["ep"], str(error))
+        else:
+            state.complete(w["ep"], res)
+        W[i] = _blank()
+        done_count += 1
 
-        payloads = [
-            {
-                "observation": encode_raw_obs(obs_list[i]),
-                "instruction": instr_list[i],
-                "noise": None,
-            }
-            for i in active
-        ]
-        chunks = model_handle.predict_batch(payloads)
-
-        # fan-out submit
-        for k, i in enumerate(active):
-            env_handles[i].submit_execute_chunk(chunks[k])
-        # gather
-        for k, i in enumerate(active):
-            try:
-                r = env_handles[i].wait_execute_chunk()
-            except Exception as e:
-                status[i]["_error"] = str(e)
-                status[i]["done"] = True
+    while True:
+        # (a) Refill idle workers from the queue; submit resets async so they
+        #     overlap the active batch below.
+        for i in range(n):
+            if W[i]["phase"] != "idle":
                 continue
-            obs_list[i] = r["obs"]
-            status[i]["steps"] += r["steps"]
-            if r["done"]:
-                status[i]["done"] = True
-                status[i]["success"] = True
+            ep = state.claim(i)
+            if ep is None:
+                continue
+            W[i]["ep"] = ep
+            try:
+                env_handles[i].submit_reset(tuple(ep))
+                W[i]["phase"] = "resetting"
+            except Exception as e:
+                _finish(i, False, str(e))
 
-    for i in range(n):
-        env_handles[i].submit_finalize_episode(status[i]["success"])
-    for i in range(n):
-        env_handles[i].wait_finalize_episode()
+        # (b) Batch all active workers and advance each one chunk.
+        active = [i for i in range(n) if W[i]["phase"] == "active"]
+        if active:
+            payloads = [
+                {
+                    "observation": encode_observation_for(cfg, W[i]["obs"]),
+                    "instruction": W[i]["instr"],
+                    "noise": None,
+                }
+                for i in active
+            ]
+            chunks = model_handle.predict_batch(payloads)
+            for k, i in enumerate(active):
+                env_handles[i].submit_execute_chunk(chunks[k])
+            for k, i in enumerate(active):
+                try:
+                    r = env_handles[i].wait_execute_chunk()
+                except Exception as e:
+                    _finish(i, False, str(e))
+                    continue
+                W[i]["obs"] = r["obs"]
+                W[i]["steps"] += r["steps"]
+                W[i]["rounds"] += 1
+                if r["done"]:
+                    _finish(i, True)
+                elif W[i]["rounds"] >= max_rounds:
+                    _finish(i, False)  # hit the chunk cap: unsuccessful
 
-    elapsed_frame = time.time() - t_frame_start
-    logger.info(
-        "frame=%s n=%s succ=%s/%s elapsed=%.1fs",
-        frame_idx,
-        n,
-        sum(s["success"] for s in status),
-        n,
-        elapsed_frame,
-    )
+        # (c) Collect the resets from (a); they overlapped the batch in (b).
+        for i in range(n):
+            if W[i]["phase"] != "resetting":
+                continue
+            try:
+                init = env_handles[i].wait_reset()
+                W[i].update(
+                    obs=init["obs"], instr=init["instruction"],
+                    task_desc=init.get("task_desc", ""),
+                    phase="active", steps=0, rounds=0,
+                )
+            except Exception as e:
+                _finish(i, False, str(e))
 
-    return [
-        {
-            "success": s["success"],
-            "steps": s["steps"],
-            "elapsed_sec": round(elapsed_frame / max(1, n), 3),
-            "task_desc": s["task_desc"],
-            **({"_error": s["_error"]} if "_error" in s else {}),
-        }
-        for s in status
-    ]
+        now = time.time()
+        if now - t_last >= 30.0:
+            in_flight = sum(1 for i in range(n) if W[i]["phase"] != "idle")
+            logger.info(
+                "continuous: batch=%s in_flight=%s done=%s %s",
+                len(active), in_flight, done_count, state.progress(),
+            )
+            t_last = now
+
+        # (d) Done when nothing is in flight and the queue is drained.
+        if not any(W[i]["phase"] != "idle" for i in range(n)) and state.is_drained():
+            break

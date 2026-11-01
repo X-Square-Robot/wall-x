@@ -26,7 +26,7 @@ def process_grounding_points(
                 if model_type == "qwen2_5":
                     new_x = max(0, min(round(x * scale_w), resized_width - 1))
                     new_y = max(0, min(round(y * scale_h), resized_height - 1))
-                elif model_type in ["qwen2"]:
+                elif model_type in ["qwen2", "qwen3", "qwen3_5"]:
                     new_x = max(0, min(999.999, (x / orig_width) * 1000))
                     new_y = max(0, min(999.999, (y / orig_height) * 1000))
                 else:
@@ -40,7 +40,7 @@ def process_grounding_points(
                     new_y1 = max(0, min(round(y1 * scale_h), resized_height - 1))
                     new_x2 = max(0, min(round(x2 * scale_w), resized_width - 1))
                     new_y2 = max(0, min(round(y2 * scale_h), resized_height - 1))
-                elif model_type in ["qwen2"]:
+                elif model_type in ["qwen2", "qwen3", "qwen3_5"]:
                     new_x1 = max(0, min(999.999, (x1 / orig_width) * 1000))
                     new_y1 = max(0, min(999.999, (y1 / orig_height) * 1000))
                     new_x2 = max(0, min(999.999, (x2 / orig_width) * 1000))
@@ -78,7 +78,7 @@ def extract_grounding_points(text: str) -> List[List[float]]:
 def reverse_grounding_points(
     text: str, orig_height, orig_width, resized_height, resized_width, model_type
 ) -> str:
-    """Inverse of ``process_grounding_points`` - map resized coords back to original."""
+    """Inverse of ``process_grounding_points`` — map resized coords back to original."""
     point_pattern = re.compile(r"<(point|box|bbox)>(.*?)</\1>")
 
     def reverse_match(match):
@@ -95,7 +95,7 @@ def reverse_grounding_points(
                 if model_type == "qwen2_5":
                     orig_x = max(0, min(orig_width - 1, round(x / scale_w)))
                     orig_y = max(0, min(orig_height - 1, round(y / scale_h)))
-                elif model_type in ["qwen2"]:
+                elif model_type in ["qwen2", "qwen3", "qwen3_5"]:
                     orig_x = max(
                         0, min(orig_width - 1, round((x / 1000) * orig_width))
                     )
@@ -113,7 +113,7 @@ def reverse_grounding_points(
                     orig_y1 = max(0, min(orig_height - 1, round(y1 / scale_h)))
                     orig_x2 = max(0, min(orig_width - 1, round(x2 / scale_w)))
                     orig_y2 = max(0, min(orig_height - 1, round(y2 / scale_h)))
-                elif model_type in ["qwen2"]:
+                elif model_type in ["qwen2", "qwen3", "qwen3_5"]:
                     orig_x1 = max(
                         0, min(orig_width - 1, round((x1 / 1000) * orig_width))
                     )

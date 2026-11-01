@@ -5,11 +5,11 @@ Server script for Wall-X model.
 This script serves a Wall-X model using a websocket server, allowing
 clients to connect and get action predictions from observations.
 
+Based on the OpenPI serve_policy.py script structure.
 """
 
 import dataclasses
 import enum
-import inspect
 import logging
 import os
 import socket
@@ -21,25 +21,34 @@ import tyro
 from wall_x._vendor.harrix.serving.websocket_policy_server import WebsocketPolicyServer
 
 
-def _server_model_config_to_infer_kwargs(model_config) -> dict:
-    from wall_x._vendor.harrix.serving._wallx_infer.infer_config import InferConfig
+def _infer_config_kwargs(model_config, config_cls):
+    """ServerModelConfig fields are the union across the three policies; filter by the target InferConfig signature."""
+    import inspect
 
-    infer_params = inspect.signature(InferConfig.__init__).parameters
+    accepted = set(inspect.signature(config_cls.__init__).parameters)
     return {
         k: v
         for k, v in vars(model_config).items()
-        if v is not None and k in infer_params
+        if v is not None and k in accepted
     }
 
 
 def get_wallx_policy(model_config, image_passing_mode, serialize_actions=True):
     from wall_x._vendor.harrix.serving.policy.wall_x_policy import WallXPolicy
-    from wall_x._vendor.harrix.serving._wallx_infer.infer_config import InferConfig
+    from wall_x._vendor.harrix.infer.infer_config import InferConfig
 
-    config = InferConfig(**_server_model_config_to_infer_kwargs(model_config))
-    return WallXPolicy(config=config, image_passing_mode=image_passing_mode, serialize_actions=serialize_actions)
-
-
+    config = InferConfig(**_infer_config_kwargs(model_config, InferConfig))
+    # default_infer_mode is a ServerModelConfig field, not an InferConfig one
+    # (so _infer_config_kwargs filters it out); pass it to the policy directly.
+    return WallXPolicy(
+        config=config,
+        image_passing_mode=image_passing_mode,
+        default_infer_mode=getattr(model_config, "default_infer_mode", "flow"),
+        serialize_actions=serialize_actions,
+        ar_do_sample=getattr(model_config, "ar_do_sample", False),
+        ar_temperature=getattr(model_config, "ar_temperature", 1.0),
+        instruction_override=getattr(model_config, "instruction_override", None),
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -60,7 +69,8 @@ class ServerModelConfig:
     train_config_path: str | None = None
     # robot_host: str = '0.0.0.0'
     # robot_port: int = 33723
-    robot_type: str = "desktop"  # ["desktop", "turtle"]
+    robot_type: str = "desktop"  # ["desktop", "turtle", "ex001"]
+    robot_id: str | None = None  # Defaults from robot_type; may be overridden.
     robot_action_start_ratio: float = (
         0.0  # proportion of action execution to start from
     )
@@ -72,8 +82,20 @@ class ServerModelConfig:
     turtle_as_desktop: bool = (
         False  # use turtle platform as desktop with fixed base/head/camera/height
     )
+    ex001_as_desktop: bool = False
+    # Shared fixed actuator targets for mobile robots in desktop mode.
+    fixed_head_pos: tuple[float, float] = (0.0, -1.0)  # yaw, pitch
+    fixed_lift: float = 0.4
+    # Base commands retain platform-specific protocol semantics.
+    fixed_car_pose: tuple[float, float, float] = (0.0, 0.0, 0.0)  # x, y, yaw
+    fixed_base_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)  # vx, vy, wz
     action_horizon: int = 32  # specify the correct horizon for the model
     action_dim: int | None = None
+    default_infer_mode: str = "flow"
+    ar_do_sample: bool = False
+    ar_temperature: float = 1.0
+    # Server-side prompt hack: if set, REPLACES the client-sent obs["instruction"]
+    instruction_override: str | None = None
     model_device: str = "cuda"
     num_inference_timesteps: int = 10
     num_inference_steps: int | None = None
@@ -83,18 +105,18 @@ class ServerModelConfig:
 
     # Please specify explicitly if the checkpoint was not trained on the x2robot dataset.
     norm_key: str | None = None
-    # Model cameras; None = infer from train config ``data.key_mappings.camera``.
-    cam_names: list[str] | None = None
+    # Dataset V2 normalizer discriminator. None keeps legacy flat-key behavior
+    # and auto-resolves a single unambiguous composite key.
+    end_effector_type: str | None = None
+    # Optional serving-host override for Dataset V2 stats.
+    normalizer_stats_path: str | None = None
+    # Remove the discretized state string from the prompt while preserving the
+    # checkpoint's state-string model topology.
+    state_drop: bool = False
     # Robot camera keys in incoming websocket observations.
     camera_front_key: str = "camera_front"
     camera_left_key: str = "camera_left"
     camera_right_key: str = "camera_right"
-    # Serving prompt controls. If the client request has no instruction,
-    # default_instruction is used. prompt_template follows train-config semantics.
-    default_instruction: str | None = None
-    prompt_template: str | None = None
-    qwen25_prompt_template: str | None = None
-    prompt_priority_order: str | None = None
 
 @dataclasses.dataclass
 class Args:
@@ -122,53 +144,22 @@ class Args:
     image_passing_mode: str = "base64"  # ["numpy", "base64"]
 
     # Model type
-    model_type: str = "wallx"  # OSS supports qwen2.5 Wall-X only
+    model_type: str = "wallx"
 
     # Serialize actions via robot_preprocessor (True for robot control, False for raw output)
     serialize_actions: bool = True
 
-    # -- Dynamic batching -----------------------------------------
+    # ── Dynamic batching ─────────────────────────────────────────
     # Set max_batch_size to enable dynamic batching. None = single mode.
     max_batch_size: int | None = None
     max_wait_time_ms: float = 0
     max_queue_size: int = 100
     timeout_ms: float = 30000
 
-    # -- Engine flags ---------------------------------------------
-    enable_experimental_engine: bool = False
-    enable_cuda_graph: bool = False
 
 
 # Default model configurations for each environment
-DEFAULT_CONFIGS: dict[EnvMode, ServerModelConfig] = {
-    EnvMode.X2ROBOT: ServerModelConfig(
-        checkpoint_path=None,
-        train_config_path=None,
-        robot_action_start_ratio=0.0,
-        robot_action_end_ratio=1.0,
-        robot_action_interpolate_multiplier=10,
-        robot_use_joint_angle_control=False,
-        turtle_as_desktop=False,
-        action_horizon=32,
-        action_dim=None,
-        model_device="cuda",
-        num_inference_timesteps=10,
-    ),
-    EnvMode.LIBERO: ServerModelConfig(
-        checkpoint_path=None,
-        train_config_path=None,
-        robot_type="desktop",
-        robot_action_start_ratio=0.0,
-        robot_action_end_ratio=1.0,
-        robot_action_interpolate_multiplier=1,
-        action_horizon=10,
-        action_dim=None,
-        model_device="cuda",
-        num_inference_timesteps=10,
-        cam_names=None,
-    ),
-}
-
+DEFAULT_CONFIGS: dict[EnvMode, ServerModelConfig] = {}
 
 def get_model_config(args: Args) -> ServerModelConfig:
     """Get model configuration from args or defaults."""
@@ -181,21 +172,17 @@ def get_model_config(args: Args) -> ServerModelConfig:
 
     raise ValueError(
         f"No default configuration for {args.env.value}. "
-        f"Please provide --model-config with model_path and action_tokenizer_path."
+        "Pass model-config:server-model-config --model-config.checkpoint-path PATH."
     )
 
 
 def create_policy(args: Args):
     """Create a policy from the given arguments."""
     model_config = get_model_config(args)
-    if args.model_type != "wallx":
-        raise ValueError(
-            f"Unsupported model type: {args.model_type!r}. "
-            "The public package only supports model_type='wallx'."
-        )
-    policy = get_wallx_policy(
-        model_config, args.image_passing_mode, args.serialize_actions
-    )
+    if args.model_type == "wallx":
+        policy = get_wallx_policy(model_config, args.image_passing_mode, args.serialize_actions)
+    else:
+        raise ValueError(f"Unsupported model type: {args.model_type}")
     return policy
 
 
@@ -207,21 +194,11 @@ def main(args: Args) -> None:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    # Set engine environment variables
-    if args.enable_experimental_engine:
-        os.environ["ENABLE_EXPERIMENTAL_INFERENCE_ENGINE"] = "true"
-        logger.info("ENABLE_EXPERIMENTAL_INFERENCE_ENGINE=true")
-
-    if args.enable_cuda_graph:
-        os.environ["ENABLE_CUDA_GRAPH"] = "true"
-        logger.info("ENABLE_CUDA_GRAPH=true")
-
     logger.info("Starting model server")
     logger.info(f"Model type: {args.model_type}")
     logger.info(f"Environment: {args.env.value}")
     logger.info(f"Port: {args.port}")
     logger.info(f"Host: {args.host}")
-    logger.info(f"Serialize actions: {args.serialize_actions}")
 
     # Create policy
     try:

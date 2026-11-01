@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, Type
 
-# Global registry mapping model_type string -> adapter class
+# Global registry mapping model_type string → adapter class
 _MODEL_REGISTRY: Dict[str, Type] = {}
 
 

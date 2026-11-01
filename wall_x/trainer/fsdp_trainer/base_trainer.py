@@ -3,32 +3,33 @@ Base Trainer for Pure PyTorch Distributed Training (DDP/FSDP)
 No accelerate dependency - can be launched directly with torchrun
 """
 
-import contextlib
-import gc
-import logging
 import os
+import gc
+import torch
+import logging
+import contextlib
+import torch.distributed as dist
 from abc import ABC, abstractmethod
 from datetime import timedelta
-from typing import Any, Optional
+from typing import Optional, Any
 
-import torch
-import torch.distributed as dist
-
-from wall_x.config.hyperparams_config import AdamWConfig
 from wall_x.config.train_config import TrainConfig
-from wall_x.trainer.trainer_utils import seed_all
+from wall_x.config.hyperparams_config import AdamWConfig
 from wall_x.utils.logger import DistributedLogger
+from wall_x.trainer.trainer_utils import seed_all
 from wall_x.utils.timers import Timers
 
 
 def setup_distributed():
     """Initialize distributed training environment.
 
-    NCCL watchdog default is 10 min - some dataset backends (e.g. lerobot's
+    NCCL watchdog default is 10 min — some dataset backends (e.g. lerobot's
     per-rank sequential LeRobotDataset indexing) can exceed that during the
     first build, causing barrier #2 to time out on the waiting rank. Allow
     the timeout to be raised via ``WALLX_DIST_TIMEOUT_MINUTES`` (default 30).
     """
+    # Determinism (incl. the cublas workspace pin) is config-driven and applied
+    # in seed_all() from hyperparams.deterministic_algorithms — nothing to set here.
     if not dist.is_initialized():
         timeout_min = int(os.environ.get("WALLX_DIST_TIMEOUT_MINUTES", "30"))
         dist.init_process_group(
@@ -81,6 +82,11 @@ _trainer_process_group = None
 def set_trainer_process_group(pg):
     global _trainer_process_group
     _trainer_process_group = pg
+
+
+def get_trainer_process_group():
+    """Return the all-rank process group used by trainer-level collectives."""
+    return _trainer_process_group
 
 
 def barrier():
@@ -166,7 +172,7 @@ class DistributedTrainer(BaseDistributedTrainer):
     ):
         self.cfg = train_config
 
-        # wandb Run object (metric recorder) - None on non-main ranks and
+        # wandb Run object (metric recorder) — None on non-main ranks and
         # when use_wandb is disabled. Distinct from self.logger below.
         self.wandb_run = wandb_run
 
@@ -191,7 +197,12 @@ class DistributedTrainer(BaseDistributedTrainer):
         self.seed = self.cfg.hyperparams.seed
         self.logger.info(f"seed {self.seed}")
 
-        seed_all(self.seed)
+        seed_all(
+            self.seed,
+            deterministic_algorithms=getattr(
+                self.cfg.hyperparams, "deterministic_algorithms", False
+            ),
+        )
         self.start_epoch = 0
         self.global_step = 0
         self.micro_step = 0
@@ -217,7 +228,7 @@ class DistributedTrainer(BaseDistributedTrainer):
 
         # Performance options
         self.nvtx = self.cfg.debug.nvtx
-        self.timers = Timers(log_level=0, log_option="minmax")
+        self.timers = Timers(log_level=-1, log_option="minmax")
 
         # Training hyperparameters
         self.max_grad_norm = opt.max_grad_norm
@@ -257,61 +268,94 @@ class DistributedTrainer(BaseDistributedTrainer):
         """Main training loop"""
         barrier()
 
+        enable_validation = self.cfg.logging.enable_validation
+
         # Optional: validate before training
-        if self.cfg.checkpoint.validate_first:
+        if enable_validation and self.cfg.checkpoint.validate_first:
             self.val_loop()
             barrier()
 
         if self.nvtx:
             torch.cuda.cudart().cudaProfilerStart()
 
-        # Profiler setup
-        enable_profiling = self.cfg.debug.profile
+        # Profiler setup. With profile_only_rank0 (default), other ranks fall
+        # through to a nullcontext — saves N-1 redundant trace dumps that would
+        # otherwise show the same per-step structure (the interesting
+        # cross-rank info is in collective kernels, not in the CPU annotations).
+        enable_profiling = self.cfg.debug.profile and (
+            not self.cfg.debug.profile_only_rank0 or self.rank == 0
+        )
         profiler = (
             self._setup_profiler() if enable_profiling else contextlib.nullcontext()
         )
 
-        for epoch in range(self.start_epoch, self.num_epoch):
-            # Training
-            self.train_loop(epoch, profiler=profiler)
-            barrier()
-            num_training_steps = getattr(self, "num_training_steps", 0)
-            if num_training_steps > 0 and self.global_step >= num_training_steps:
-                break
+        try:
+            for epoch in range(self.start_epoch, self.num_epoch):
+                # Training
+                self.train_loop(epoch, profiler=profiler)
+                barrier()
+                num_training_steps = getattr(self, "num_training_steps", 0)
+                if num_training_steps > 0 and self.global_step >= num_training_steps:
+                    break
+                if (
+                    self.cfg.debug.max_steps
+                    and self.global_step >= self.cfg.debug.max_steps
+                ):
+                    break
 
-            # Save checkpoint
-            if (epoch + 1) % self.cfg.logging.epoch_save_interval == 0:
-                self.save_checkpoint(epoch)
+                # Save checkpoint
+                if (epoch + 1) % self.cfg.logging.epoch_save_interval == 0:
+                    self.save_checkpoint(epoch)
 
-            # Validation
-            self.val_loop()
-            barrier()
+                # Validation
+                if enable_validation:
+                    self.val_loop()
+                    barrier()
 
-            gc.collect()
-            torch.cuda.empty_cache()
-
-        if self.nvtx:
-            torch.cuda.cudart().cudaProfilerStop()
+                gc.collect()
+                torch.cuda.empty_cache()
+        finally:
+            close_dataset = getattr(getattr(self, "dataset", None), "close", None)
+            if callable(close_dataset):
+                close_dataset()
+            if self.nvtx:
+                torch.cuda.cudart().cudaProfilerStop()
 
     def _setup_profiler(self):
         """Setup PyTorch profiler"""
-        return torch.profiler.profile(
-            activities=[
+        # CPython 3.12.5-3.13 loses the c_return of star-called bound C methods
+        # (gh-122029), so torch 2.13's with_stack tracer leaks one unclosed
+        # FunctionMeta.apply C frame per custom-op call -> giant fake frame
+        # towers in the trace. The patch star-calls the raw PyCFunction instead
+        # (paired correctly); see dev/runs/profiler_tower/PROFILER_TOWER_REPORT.md.
+        from wall_x.utils.fix_profiler_tower import apply_patch
+
+        apply_patch()
+        if os.environ.get("WALLX_PROFILE_CUDA_ONLY", "0") == "1":
+            activities = [torch.profiler.ProfilerActivity.CUDA]
+        else:
+            activities = [
                 torch.profiler.ProfilerActivity.CPU,
                 torch.profiler.ProfilerActivity.CUDA,
-            ],
+            ]
+
+        return torch.profiler.profile(
+            activities=activities,
             schedule=torch.profiler.schedule(
                 wait=self.cfg.debug.profile_wait_iters,
                 warmup=self.cfg.debug.profile_warmup_iters,
                 active=self.cfg.debug.profile_active_iters,
+                repeat=self.cfg.debug.profile_repeat,
             ),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(
                 self.cfg.debug.profile_save_path,
                 worker_name=f"worker{self.rank}",
+                use_gzip=self.cfg.debug.profile_use_gzip,
             ),
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True,
+            record_shapes=self.cfg.debug.profile_record_shapes,
+            profile_memory=self.cfg.debug.profile_memory,
+            with_stack=self.cfg.debug.profile_with_stack,
+            with_modules=self.cfg.debug.profile_with_modules,
         )
 
     def gather_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
@@ -334,13 +378,21 @@ class DistributedTrainer(BaseDistributedTrainer):
         """Zero optimizer gradients"""
         self.optimizer.zero_grad(set_to_none=True)
 
-    def optimizer_step(self):
-        """Perform optimizer step"""
+    def optimizer_step(self) -> bool:
+        """Perform an optimizer step and report whether parameters were updated.
+
+        ``GradScaler.step`` returns the optimizer's return value, which is
+        normally ``None`` both when it ran and when overflow made it skip.
+        A skipped step is instead observable through the scale reduction made
+        by ``GradScaler.update``.
+        """
         if self.grad_scaler is not None:
+            scale_before = float(self.grad_scaler.get_scale())
             self.grad_scaler.step(self.optimizer)
             self.grad_scaler.update()
-        else:
-            self.optimizer.step()
+            return float(self.grad_scaler.get_scale()) >= scale_before
+        self.optimizer.step()
+        return True
 
     def lr_scheduler_step(self):
         """Perform learning rate scheduler step"""
@@ -374,10 +426,6 @@ class DistributedTrainer(BaseDistributedTrainer):
         if not is_main_process():
             return
 
-        # Prefer the cross-rank reduced loss (train_loss) from
-        # _current_step_stats so the console line matches what wall_x_2509's
-        # fsdp_trainer prints and what wandb sees. Falls back to the raw
-        # rank-0 local tensor when stats haven't been populated yet.
         _smoothed = getattr(self, "_current_step_stats", None) or {}
         _loss_to_print = _smoothed.get("train_loss", float(loss))
 
@@ -402,18 +450,23 @@ class DistributedTrainer(BaseDistributedTrainer):
 
     def true_gather(self, value):
         """Gather values across all processes and compute mean over non-None values."""
-        device = next(self.model.parameters()).device
+        # Parameters may live on CPU under FSDP CPU offload; NCCL needs CUDA tensors.
+        device = (
+            torch.device("cuda", torch.cuda.current_device())
+            if torch.cuda.is_available()
+            else next(self.model.parameters()).device
+        )
 
         # CRITICAL: must clone() here, not just detach().
         # detach() only disconnects the computation graph but still shares the
-        # same underlying storage.  dist.all_reduce() is **in-place** - it
+        # same underlying storage.  dist.all_reduce() is **in-place** — it
         # overwrites that storage with the sum across all ranks.  If the caller
         # passes a tensor that is also referenced elsewhere (e.g. outputs["loss"]
         # and outputs["flow_loss"] pointing to the same scalar_loss), the
         # in-place all_reduce silently mutates the original, causing downstream
         # readers (like training_log) to see a value multiplied by world_size.
         value_to_gather = (
-            value.detach().clone()
+            value.detach().clone().to(device)
             if value is not None
             else torch.tensor(0.0, device=device)
         )

@@ -37,7 +37,9 @@ def _get_class(cfg: EvalConfig) -> Type[BaseEnv]:
                     "Install LIBERO/robosuite and their simulator dependencies "
                     "before using env.type='libero'."
                 ) from exc
-        raise ValueError(f"unknown env type={t!r}, registered: {sorted(_REGISTRY)}")
+        raise ValueError(
+            f"unknown env type={t!r}, registered: {sorted(_REGISTRY)}"
+        )
     return cls
 
 
@@ -47,6 +49,14 @@ def build_env(cfg: EvalConfig, worker_id: int) -> BaseEnv:
 
 def enumerate_episodes_for(cfg: EvalConfig) -> list[tuple]:
     return _get_class(cfg).enumerate_episodes(cfg)
+
+
+def encode_observation_for(cfg: EvalConfig, raw_obs: dict) -> dict:
+    return _get_class(cfg).encode_observation(raw_obs)
+
+
+def max_infer_rounds_for(cfg: EvalConfig) -> int:
+    return _get_class(cfg).max_infer_rounds(cfg)
 
 
 def registered_envs() -> list[str]:

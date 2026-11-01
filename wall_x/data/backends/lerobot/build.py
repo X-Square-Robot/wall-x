@@ -105,8 +105,8 @@ class _LerobotDatasetWrapper:
         # train and val splits (flipped by ``_train()`` / ``_eval()``).
         # The val DataLoader's DistributedSampler caches total_size sized
         # to the val split but ``__iter__`` reads ``len(self.dataset)``
-        # live - if a preceding train_loop left the pointer at train, that
-        # live len is ~20x total_size and DistributedSampler asserts.
+        # live — if a preceding train_loop left the pointer at train, that
+        # live len is ~20× total_size and DistributedSampler asserts.
         # Rebuild each time so ``_eval()`` runs and a fresh sampler is
         # snapped to the current (val) split length. Mirrors the train-side
         # rebuild-on-every-epoch pattern.
@@ -155,7 +155,7 @@ def load_trainer_data_config_from_yaml_dict(yaml_dict: Dict[str, Any]) -> Lerobo
 
 
 def _build_flat_config(cfg: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Map typed TrainConfig -> (flat_config, lerobot_config) for legacy entry.
+    """Map typed TrainConfig → (flat_config, lerobot_config) for legacy entry.
 
     ``load_lerobot_data`` expects a 2509-style flat dict plus a separate
     ``lerobot_config`` carrying ``repo_id`` / ``root``. This function is
@@ -185,6 +185,13 @@ def _build_flat_config(cfg: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     }
     if raw_data.get("max_length") is not None:
         data_section["max_length"] = raw_data["max_length"]
+    # Vision resize knobs live in the YAML data section but are not dataclass
+    # fields. The frame loader reads them off this flat dict.
+    for key in ("image_factor", "min_pixels", "max_pixels"):
+        if raw_data.get(key) is not None:
+            data_section[key] = raw_data[key]
+    if getattr(cfg, "model_type", None):
+        data_section.setdefault("model_type", cfg.model_type)
     if data.priority_order is not None:
         data_section["priority_order"] = data.priority_order
     if data.camera_name_mapping is not None:
@@ -195,15 +202,15 @@ def _build_flat_config(cfg: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     )
     data_section.setdefault(
         "state_bins",
-        raw_data.get("state_bins", raw.get("state_bins", 256)),
+        raw_data.get("state_bins", getattr(data, "state_bins", 256)),
     )
 
     # Dof/agent_pos totals for the collator's zero-pad step. When resuming
-    # from a checkpoint trained on a larger action space, task.dof_config
-    # should include an ``action_padding`` key that absorbs the diff; the
-    # collator right-pads action/agent_pos tensors to these totals with
-    # dof_mask/agent_pos_mask zeroed on padded dims so loss doesn't flow
-    # through them.
+    # from a checkpoint trained on a larger action space (e.g. bus2602 26-dim
+    # dof while libero data is 7-dim), task.dof_config should include an
+    # ``action_padding`` key that absorbs the diff; the collator right-pads
+    # action/agent_pos tensors to these totals with dof_mask/agent_pos_mask
+    # zeroed on padded dims so loss doesn't flow through them.
     dof_total = int(sum((cfg.task.dof_config or {}).values()))
     agent_pos_total = int(sum((cfg.task.agent_pos_config or {}).values()))
 
@@ -228,7 +235,7 @@ def _build_flat_config(cfg: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         "state_bins": int(
             raw_data.get("state_bins")
             or data_section.get("state_bins")
-            or raw.get("state_bins")
+            or getattr(data, "state_bins", None)
             or 256
         ),
         "data": data_section,
@@ -244,7 +251,7 @@ def load_lerobot_v2(
     The third return value ``train_num`` is a snapshot of
     ``len(train_dataloader)`` at construction time. It matches
     ``wrapper.global_train_iters.value`` initially but does not track
-    subsequent rebuilds inside ``set_epoch`` - callers doing dynamic
+    subsequent rebuilds inside ``set_epoch`` — callers doing dynamic
     resampling should read from the mp.Value, not from this snapshot.
     """
     from wall_x.data.backends.lerobot.loader import load_lerobot_data
@@ -269,7 +276,7 @@ def load_lerobot_v2(
 
     # PreprocessedDataset.get_*_dataloader returns (dataloader, sampler).
     # Build val first, train second, so the inner ``_dataset`` pointer is
-    # left at the train split when we finish - workers fork from that
+    # left at the train split when we finish — workers fork from that
     # state on first iteration.
     val_dataloader, _ = inner.get_val_dataloader()
     val_num = len(val_dataloader) if val_dataloader is not None else 0
@@ -308,7 +315,7 @@ def load_lerobot_v2(
 
 
 def build(cfg, ctx):
-    """Backend Protocol entry - returns a ``DataBundle``.
+    """Backend Protocol entry — returns a ``DataBundle``.
 
     Wraps ``load_lerobot_v2`` (which returns the trainer-facing triple)
     into the unified ``DataBundle`` shape every backend exposes.

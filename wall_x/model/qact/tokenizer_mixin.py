@@ -1,10 +1,14 @@
 """Action tokenizer mixin for loading tokenizers and action mappings."""
 
+import fcntl
+import hashlib
+import inspect
+import os
+
+import torch
+import numpy as np
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple, Union
-
-import numpy as np
-import torch
 from transformers import AutoProcessor
 
 from wall_x.utils.constant import is_action_dataset_name
@@ -14,6 +18,8 @@ try:
     from spatial_tokenizer.spatial_tokenizer import SpatialActionTokenizer
 except ImportError:
     SpatialActionTokenizer = None
+
+
 
 
 class ActionTokenizerMixin(ABC):
@@ -98,7 +104,7 @@ class ActionTokenizerMixin(ABC):
         Build action_mapper
 
         Args:
-            processor: HuggingFace processor,used to convert tokens to IDs
+            processor: HuggingFace processor，used to convert tokens to IDs
 
         Returns:
             action_mapper dictionary; format depends on tokenizer type
@@ -311,9 +317,26 @@ class FastTokenizerMixin(ActionTokenizerMixin):
 
     def load_tokenizer(self, config: dict, normalizer, device: str = "cpu") -> Any:
         """Load the fast tokenizer"""
-        self._tokenizer = AutoProcessor.from_pretrained(
-            config["action_tokenizer_path"], trust_remote_code=True
-        )
+        action_tokenizer_path = config["action_tokenizer_path"]
+        lock_key = hashlib.sha1(
+            os.path.abspath(action_tokenizer_path).encode("utf-8")
+        ).hexdigest()[:16]
+        lock_path = f"/tmp/wallx_autoprocessor_{lock_key}.lock"
+
+        # Serialize concurrent AutoProcessor(trust_remote_code=True) loads across
+        # ranks — they race on HF's remote-code module cache. fcntl.flock is a
+        # kernel-held advisory lock that auto-releases when the fd is closed or the
+        # process dies, so there is no stale-lock timeout / TOCTOU cleanup to get
+        # wrong; waiters queue in the kernel instead of polling.
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            self._tokenizer = AutoProcessor.from_pretrained(
+                action_tokenizer_path, trust_remote_code=True
+            )
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
         self.action_normalizer = normalizer
         return self._tokenizer
 
@@ -946,7 +969,7 @@ def get_action_tokenizer_mixin(tokenizer_type: str) -> ActionTokenizerMixin:
     Get the mixin instance for a tokenizer type
 
     Args:
-        tokenizer_type: tokenizer type, supports "fast", "spatialvla"
+        tokenizer_type: tokenizer type, supports "fast" and "spatialvla"
 
     Returns:
         ActionTokenizerMixin instance

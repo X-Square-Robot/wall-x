@@ -4,15 +4,12 @@ LeRobot Dataset Loader - Distributed Version
 
 import logging
 import os
-from typing import Protocol, SupportsIndex, TypeVar
-
 import numpy as np
 import torch
-from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
-from qwen_vl_utils.vision_process import smart_resize
 from torch.utils.data import DistributedSampler, random_split
-from transformers import AutoProcessor
-
+from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+from typing import Protocol, SupportsIndex, TypeVar
+from qwen_vl_utils.vision_process import smart_resize
 from wall_x._vendor.x2robot_utils.geometry import (
     canonicalize_euler_zyx_batch_nb,
     euler_to_matrix_zyx_batch_nb,
@@ -31,12 +28,14 @@ from wall_x.data.backends.lerobot.rotation_layout import (
     layout_uses_6d_rotation as _layout_uses_6d_rotation,
 )
 from wall_x.data.backends.lerobot.utils import (
-    get_wallx_normal_text,
-    load_norm_stats,
-    preprocesser_call,
     process_grounding_points,
+    get_wallx_normal_text,
     replace_action_token,
+    preprocesser_call,
+    load_norm_stats,
 )
+
+from transformers import AutoProcessor
 
 T_co = TypeVar("T_co", covariant=True)
 logger = logging.getLogger(__name__)
@@ -75,6 +74,20 @@ def _compute_delta_from_state_and_abs_rot(
         d_euler = matrix_to_euler_zyx_batch_nb(r_rel)
         return canonicalize_euler_zyx_batch_nb(d_euler)
     return r_rel[:, :2, :].reshape(r_rel.shape[0], 6)
+
+
+def _active_layout_dim(layout_config: dict) -> int:
+    return sum(
+        int(dim) for key, dim in layout_config.items() if key not in RELATIVE_SKIP_KEYS
+    )
+
+
+def _truncate_to_active(vec, layout_config: dict):
+    """Drop trailing DOFs that are outside the configured layout."""
+    active = _active_layout_dim(layout_config)
+    if active and vec.shape[-1] > active:
+        return vec[..., :active]
+    return vec
 
 
 # Abstract class for dataset
@@ -125,12 +138,18 @@ class PreprocessedDataset(Dataset[T_co]):
         self.norm_stats = norm_stats
         self.lerobot_config = lerobot_config
 
+        vision_kwargs = {}
+        for key in ("image_factor", "min_pixels", "max_pixels", "model_type"):
+            value = self.dataload_config.get(key)
+            if value is not None:
+                vision_kwargs[key] = value
         self.data_config = LerobotConfig().update(
             train_test_split=self.dataload_config["train_test_split"],
             seed=self.dataload_config["seed"],
             resolution=self.dataload_config.get("resolution", None),
             priority_order=self.dataload_config.get("priority_order", None),
             camera_name_mapping=self.dataload_config.get("camera_name_mapping", None),
+            **vision_kwargs,
         )
 
         self.key_mappings = self.dataload_config["key_mappings"]
@@ -165,11 +184,7 @@ class PreprocessedDataset(Dataset[T_co]):
                     else "-"
                 ),
                 (
-                    sum(
-                        d
-                        for k, d in self._dof_config.items()
-                        if k not in RELATIVE_SKIP_KEYS
-                    )
+                    _active_layout_dim(self._dof_config)
                     if self._convert_action_euler_to_6d
                     else "-"
                 ),
@@ -261,22 +276,10 @@ class PreprocessedDataset(Dataset[T_co]):
         image_inputs, h, w, resize_h, resize_w = self._vision_preprocess(data)
         agent_pos = data[self._state_key_mapping["state"]]
         action = data[self._action_key_mapping["action"]]
-        # Drop trailing unused DOFs (e.g. velocity/height/head) when config
-        # only trains arms and relies on action_padding for the 26-D slot.
-        state_active = sum(
-            int(d)
-            for k, d in self._agent_pos_config.items()
-            if k not in RELATIVE_SKIP_KEYS
-        )
-        action_active = sum(
-            int(d)
-            for k, d in self._dof_config.items()
-            if k not in RELATIVE_SKIP_KEYS
-        )
-        if state_active and agent_pos.shape[-1] > state_active:
-            agent_pos = agent_pos[..., :state_active]
-        if action_active and action.shape[-1] > action_active:
-            action = action[..., :action_active]
+        # Drop trailing unused DOFs (velocity/height/head) when the config
+        # only trains arms and uses action_padding for the remaining slot.
+        agent_pos = _truncate_to_active(agent_pos, self._agent_pos_config)
+        action = _truncate_to_active(action, self._dof_config)
         agent_pos = self._maybe_convert_euler_to_6d(
             agent_pos, self._agent_pos_config, self._convert_state_euler_to_6d
         )
@@ -301,6 +304,8 @@ class PreprocessedDataset(Dataset[T_co]):
             self._cam_key_mapping,
             generate_subtask_ratio=generate_subtask_ratio,
             camera_name_mapping=self.data_config.camera_name_mapping,
+            system_prompt=self.data_config.system_prompt,
+            instruction_label=self.data_config.instruction_label,
         )
         text = process_grounding_points(
             complete_text, h, w, resize_h, resize_w, self.data_config.model_type
@@ -358,7 +363,7 @@ class PreprocessedDataset(Dataset[T_co]):
             ),
             pin_memory=True,  # Enable for GPU training
             persistent_workers=num_workers > 0,  # Only if num_workers > 0
-            prefetch_factor=2 if num_workers > 0 else None,
+            prefetch_factor=2,  # Reduce memory usage
             drop_last=True,  # Avoid incomplete batches
         )
 
@@ -394,7 +399,7 @@ class PreprocessedDataset(Dataset[T_co]):
             ),
             pin_memory=True,
             persistent_workers=num_workers > 0,
-            prefetch_factor=2 if num_workers > 0 else None,
+            prefetch_factor=2,
             drop_last=False,
         )
 
@@ -532,7 +537,7 @@ class DataCollator:
         additional_inputs = {}
 
         # Tail-pad widths when dof_config / agent_pos_config (sum) is larger
-        # than the lerobot action/state - typical when resuming a ckpt that
+        # than the lerobot action/state — typical when resuming a ckpt that
         # was pretrained on a bigger action space. Extra columns are filled
         # with zeros and their mask set to 0 so loss is not propagated.
         dof_total = int(self.config.get("dof_total_dim", 0) or 0)

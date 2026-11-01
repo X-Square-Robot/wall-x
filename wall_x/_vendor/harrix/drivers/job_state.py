@@ -40,15 +40,16 @@ class JobState:
         self._batch_sync_mode = bool(batch_sync_mode)
         self._batch_size = int(batch_size)
 
-        completed_set = (
-            self._load_completed(log_path) if os.path.exists(log_path) else set()
+        loaded_completed = (
+            self._load_completed_results(log_path) if os.path.exists(log_path) else {}
         )
+        completed_set = set(loaded_completed)
         remaining: list[tuple] = [
             tuple(ep) for ep in all_episodes if tuple(ep) not in completed_set
         ]
 
         self._in_progress: dict[tuple, int] = {}
-        self._completed: dict[tuple, dict] = {}
+        self._completed: dict[tuple, dict] = dict(loaded_completed)
         self._failed: dict[tuple, str] = {}
 
         if self._batch_sync_mode:
@@ -101,12 +102,14 @@ class JobState:
             cur_bucket.append(ep)
         if cur_bucket:
             for i in range(0, len(cur_bucket), batch_size):
-                frames.append({"eps": cur_bucket[i : i + batch_size], "next_slot": 0})
+                frames.append(
+                    {"eps": cur_bucket[i : i + batch_size], "next_slot": 0}
+                )
         return frames
 
     @staticmethod
-    def _load_completed(log_path: str) -> set[tuple]:
-        completed = set()
+    def _load_completed_results(log_path: str) -> dict[tuple, dict]:
+        completed = {}
         with open(log_path, "r") as f:
             for line in f:
                 line = line.strip()
@@ -117,7 +120,12 @@ class JobState:
                 except json.JSONDecodeError:
                     continue
                 if rec.get("event") == "completed" and "ep_id" in rec:
-                    completed.add(tuple(rec["ep_id"]))
+                    ep = tuple(rec["ep_id"])
+                    completed[ep] = {
+                        k: v
+                        for k, v in rec.items()
+                        if k not in ("event", "ep_id", "ts", "worker", "frame")
+                    }
         return completed
 
     def _append_log(self, extra: dict):

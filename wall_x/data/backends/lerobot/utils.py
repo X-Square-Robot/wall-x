@@ -320,6 +320,8 @@ def get_wallx_normal_text(
     cam_mapping: Optional[Dict[str, str]] = None,
     generate_subtask_ratio: float = 0.0,
     camera_name_mapping: Optional[Dict[str, str]] = None,
+    system_prompt: Optional[str] = None,
+    instruction_label: str = "Instruction",
 ) -> Tuple[str, bool]:
     """Construct complete multimodal prompt text for Wall-X model.
 
@@ -338,6 +340,8 @@ def get_wallx_normal_text(
         cam_mapping: Camera name mapping dictionary
         generate_subtask_ratio: Probability of generating subtask instead of actions
         camera_name_mapping: Optional display-name mapping for prompt text
+        system_prompt: Optional system message; defaults to a generic assistant
+        instruction_label: Label before the task text (default "Instruction")
 
     Returns:
         Tuple of (formatted_prompt_text, is_subtask_generation)
@@ -353,9 +357,8 @@ def get_wallx_normal_text(
     action_fast_symbol = "<|action_fast|>"
 
     # System prologue
-    prologue = (
-        f"{role_start_symbol}system\nYou are a helpful assistant.{role_end_symbol}\n"
-    )
+    system_prompt = system_prompt or "You are a helpful assistant."
+    prologue = f"{role_start_symbol}system\n{system_prompt}{role_end_symbol}\n"
 
     # User request with observation
     user_request = f"{role_start_symbol}user\nObservation:"
@@ -364,7 +367,7 @@ def get_wallx_normal_text(
         for _, cam_name in cam_mapping.items():
             view_name = camera_name_mapping.get(cam_name, cam_name)
             user_request += f" {view_name}: {vision_start_symbol}{image_pad_symbol}{vision_end_symbol}"
-    user_request += "\nInstruction:"
+    user_request += f"\n{instruction_label}:"
 
     # Get frame-specific instruction
     frame_instruction_info, _ = get_frame_instruction(
@@ -523,7 +526,7 @@ def preprocesser_call(
             )
         else:
             raise RuntimeError(
-                "processor has no video_processor attribute - this code path "
+                "processor has no video_processor attribute — this code path "
                 "requires transformers>=5.2. Upgrade transformers or pass "
                 "videos=None."
             )

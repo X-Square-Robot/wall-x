@@ -11,14 +11,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+from typing import Optional
 
 import torch
 
 from wall_x.data.backends.lerobot.utils import NormStats
-from wall_x.model.core.action.normalizer import Normalizer, pad_normalizer_to_dim
-from wall_x._vendor.harrix.utils.train_config import (
-    resolve_agent_pos_config,
-    resolve_dof_config,
+from wall_x.model.core.action.normalizer import (
+    NORM_KEY_SEP,
+    Normalizer,
+    make_norm_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,68 +33,96 @@ def _load_norm_stats(norm_stats_path: str, action_key: str) -> NormStats:
     return NormStats(min=q01, max=q99, delta=q99 - q01)
 
 
-def _load_custom_action_stats(train_config: dict) -> dict | None:
-    custom = train_config.get("customized_action_statistic_dof", None)
-    if not custom:
-        return None
-    with open(custom, "r") as f:
-        return json.load(f)
+def pad_norm_stats_like_collator(stats: NormStats, target_dim: int) -> NormStats:
+    """Tail-pad flat LeRobot stats so padded dims normalize to 0.
 
+    The LeRobot collator normalizes with the unpadded stats and then pads the
+    normalized action/state with zeros. min=-1, delta=2 maps a raw 0 to 0.
+    """
+    pad = int(target_dim) - int(stats.min.numel())
+    if pad < 0:
+        raise ValueError(
+            f"norm stats dim ({stats.min.numel()}) exceeds configured dim ({target_dim})"
+        )
+    if pad == 0:
+        return stats
 
-def _normalizer_from_stats(action_stats: dict, train_config: dict, key: str) -> Normalizer:
-    return Normalizer(
-        action_stats,
-        train_config[key],
-        min_key=train_config.get("min_key", "min"),
-        delta_key=train_config.get("delta_key", "delta"),
-    )
+    def _cat(t, value):
+        return torch.cat([t.flatten(), torch.full((pad,), value, dtype=t.dtype)])
 
-
-def _missing_normalizer_error(checkpoint_path: str, train_config: dict) -> FileNotFoundError:
-    custom = train_config.get("customized_action_statistic_dof", None)
-    return FileNotFoundError(
-        "Public inference requires normalization data. Expected one of: "
-        f"{os.path.join(checkpoint_path, 'norm_stats.json')}; checkpoint-side "
-        "normalizer_action.pth and normalizer_propri.pth; or an explicit "
-        f"customized_action_statistic_dof path. Current customized_action_statistic_dof={custom!r}."
+    return NormStats(
+        min=_cat(stats.min, -1.0), max=_cat(stats.max, 1.0), delta=_cat(stats.delta, 2.0)
     )
 
 
 def build_normalizers(
     checkpoint_path: str,
-    train_config: dict,
+    cfg,
     norm_key: str,
+    end_effector_type: Optional[str] = None,
 ) -> tuple[Normalizer, Normalizer, str]:
-    """Return action/proprio normalizers and the resolved norm key."""
+    """Return action/proprio normalizers and the resolved norm key.
+
+    ``cfg`` is the typed ``TrainConfig``.
+    """
+    norm_cfg = getattr(cfg.data, "normalizer_config", None) or {}
+
+    def _norm_opt(key, default=None):
+        value = norm_cfg.get(key)
+        if value is None:
+            value = getattr(cfg.data, key, None)
+        return default if value is None else value
+
     norm_stats_path = os.path.join(checkpoint_path, "norm_stats.json")
     if os.path.exists(norm_stats_path):
-        propri_stats = _load_norm_stats(norm_stats_path, "observation.state")
-        action_stats = _load_norm_stats(norm_stats_path, "action")
+        propri_stats = pad_norm_stats_like_collator(
+            _load_norm_stats(norm_stats_path, "observation.state"), cfg.propri_dim
+        )
+        action_stats = pad_norm_stats_like_collator(
+            _load_norm_stats(norm_stats_path, "action"), cfg.action_dim
+        )
         normalizer_propri = Normalizer.from_lerobot_norm_stats(propri_stats, norm_key)
         normalizer_action = Normalizer.from_lerobot_norm_stats(action_stats, norm_key)
     else:
         action_pth = os.path.join(checkpoint_path, "normalizer_action.pth")
         propri_pth = os.path.join(checkpoint_path, "normalizer_propri.pth")
-        custom_stats = _load_custom_action_stats(train_config)
-        if custom_stats is None and (not os.path.exists(action_pth) or not os.path.exists(propri_pth)):
-            raise _missing_normalizer_error(checkpoint_path, train_config)
+        custom = _norm_opt("customized_action_statistic_dof")
+        if not custom and not (os.path.exists(action_pth) and os.path.exists(propri_pth)):
+            raise FileNotFoundError(
+                "Public inference requires normalization data. Expected one of: "
+                f"{norm_stats_path}; checkpoint-side normalizer_action.pth and "
+                "normalizer_propri.pth; or data.normalizer_config."
+                "customized_action_statistic_dof."
+            )
+        custom_stats = None
+        if custom:
+            with open(custom, "r") as f:
+                custom_stats = json.load(f)
+        min_key = _norm_opt("min_key", "min")
+        delta_key = _norm_opt("delta_key", "delta")
 
         if os.path.exists(action_pth):
             normalizer_action = Normalizer.from_ckpt(action_pth)
         else:
-            normalizer_action = _normalizer_from_stats(custom_stats, train_config, "dof_config")
-
+            normalizer_action = Normalizer(
+                custom_stats, cfg.task.dof_config, min_key=min_key, delta_key=delta_key
+            )
         if os.path.exists(propri_pth):
             normalizer_propri = Normalizer.from_ckpt(propri_pth)
         else:
-            normalizer_propri = _normalizer_from_stats(custom_stats, train_config, "agent_pos_config")
+            normalizer_propri = Normalizer(
+                custom_stats,
+                cfg.task.agent_pos_config,
+                min_key=min_key,
+                delta_key=delta_key,
+            )
 
-    action_dim = sum(resolve_dof_config(train_config).values())
-    propri_dim = sum(resolve_agent_pos_config(train_config).values())
-    pad_normalizer_to_dim(normalizer_action, action_dim, "action")
-    pad_normalizer_to_dim(normalizer_propri, propri_dim, "propri")
-
-    resolved = _resolve_norm_key(norm_key, normalizer_action, normalizer_propri)
+    resolved = _resolve_norm_key(
+        norm_key,
+        normalizer_action,
+        normalizer_propri,
+        end_effector_type=end_effector_type,
+    )
     return normalizer_action, normalizer_propri, resolved
 
 
@@ -101,11 +130,23 @@ def _resolve_norm_key(
     norm_key: str,
     normalizer_action: Normalizer,
     normalizer_propri: Normalizer,
+    end_effector_type: Optional[str] = None,
 ) -> str:
-    """Resolve a requested norm key against normalizer keys."""
+    """Resolve a requested norm key against normalizer keys.
+
+    Composite keys use ``dataset/end_effector_type``; a single composite match
+    is selected automatically, while multiple matches require an explicit type.
+    """
     available = sorted(
         set(normalizer_action.min.keys()) & set(normalizer_propri.min.keys())
     )
+    if end_effector_type:
+        composite = make_norm_key(norm_key, end_effector_type)
+        if composite in available:
+            return composite
+        logger.warning(
+            "composite norm key %r not found; available=%s", composite, available
+        )
     if norm_key in available:
         return norm_key
     if not available:
@@ -119,6 +160,16 @@ def _resolve_norm_key(
             prefix_matches[0],
         )
         return prefix_matches[0]
+    composite_matches = [
+        k for k in available if k.startswith(f"{norm_key}{NORM_KEY_SEP}")
+    ]
+    if len(composite_matches) == 1:
+        return composite_matches[0]
+    if len(composite_matches) > 1:
+        raise RuntimeError(
+            f"norm_key={norm_key!r} matches multiple end_effector_types "
+            f"{composite_matches}; set model.end_effector_type explicitly."
+        )
     if len(available) == 1:
         logger.warning(
             "norm_key=%r not found; using the only available key %r",

@@ -4,6 +4,8 @@
 
 任务：双臂机器人 **三花插花**，flow 动作预测，推理指令示例：`arrange flower`。
 
+> 当前 Qwen3.5 LeRobot loader 会按 `dof_config` 丢掉尾部多余自由度，并在键名含 `rotation_6D` / `_relative` 时做欧拉到 6D 和相对动作转换。归一化脚本使用同一套布局。下面的流程按这个行为编写。
+
 ---
 
 ## 1. 任务与动作空间
@@ -25,11 +27,11 @@
 |------|------|------|
 | 左臂相对位姿 + 夹爪 | 3 + 6 + 1 = 10 | `follow_left_ee_*_relative` + gripper |
 | 右臂相对位姿 + 夹爪 | 3 + 6 + 1 = 10 | `follow_right_ee_*_relative` + gripper |
-| **有效动作合计** | **20** | loader 从数据集向量中取前 20 维 |
+| **有效动作合计** | **20** | loader 按 `dof_config` 取前 20 维，丢掉尾部多余自由度 |
 | `action_padding` | 6 | 虚拟填充，loss 不反传 |
 | **模型输入合计** | **26** | 与 Wall-OSS-0.5 预训练空间一致 |
 
-> 若 LeRobot 数据集中 `action` / `observation.state` 为 **26 维**（含额外 DOF），训练配置通过 `dof_config` + loader 截断，只使用前 20 维有效双臂数据。
+> 若 LeRobot 数据集中 `action` / `observation.state` 为 **26 维**（含额外 DOF），loader 按 `dof_config` 截取前 20 维有效双臂数据，`action_padding` 不占数据集向量。
 
 示例训练配置位于 `workspace/example/`（复制后按实际路径修改）。
 
@@ -130,7 +132,7 @@ data:
 
 ### 3.2 维度与内容
 
-- `observation.state` / `action` 建议为 **26 维**；若含额外 DOF，训练时按 `dof_config` 自动截取前 20 维双臂分量
+- `observation.state` / `action` 建议为 **26 维**；若含额外 DOF，训练时按 `dof_config` 截取前 20 维双臂分量
 - 相机原始分辨率不限，训练时统一 resize 到 448×448
 - 数据集需符合 LeRobot v3 目录结构（含 `meta/`、`data/` 等）
 
@@ -364,7 +366,7 @@ python scripts/draw_openloop_plot.py \
 
 ### Q5: lerobot 版本不对
 
-固定使用 **v0.4.4** tag，`pip install --no-deps -e .` 安装。
+与仓库根目录 README 相同：`pip install --no-deps lerobot==0.4.4`。
 
 ---
 
