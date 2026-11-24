@@ -119,7 +119,7 @@ def read_global_step(checkpoint_path: str) -> int | None:
     p = os.path.join(checkpoint_path, "global_step.pth")
     if not os.path.exists(p):
         return None
-    payload = torch.load(p)
+    payload = torch.load(p, map_location="cpu")
     return int(payload["global_step"])
 
 

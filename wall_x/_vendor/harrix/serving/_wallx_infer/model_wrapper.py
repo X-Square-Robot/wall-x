@@ -129,7 +129,9 @@ class WallxModelWrapper:
             checkpoint_path = self.config.checkpoint_path
 
         if os.path.exists(os.path.join(checkpoint_path, "global_step.pth")):
-            global_step = torch.load(os.path.join(checkpoint_path, "global_step.pth"))[
+            global_step = torch.load(
+                os.path.join(checkpoint_path, "global_step.pth"), map_location="cpu"
+            )[
                 "global_step"
             ]
             self.logger.info(f"checkpoint global_step: {global_step}")

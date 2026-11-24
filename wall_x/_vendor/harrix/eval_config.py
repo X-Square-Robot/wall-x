@@ -12,6 +12,7 @@ YAML schema:
       action_horizon: null            # null = read data.action_horizon_flow
       architecture: qwen2_5           # adapter registry key
       action_mode: flow               # flow / ar / dllm / vqa / subtask
+      device: null                    # null = cuda, then xpu, then cpu
     env:
       type: libero                    # env registry key
       seed: 42
@@ -62,6 +63,8 @@ class ModelSection:
     architecture: str = "qwen2_5"
     # Inference algorithm. Each adapter validates its supported subset.
     action_mode: str = "flow"
+    # Torch device for the model, e.g. cuda, xpu or cpu. None picks cuda, then xpu, then cpu.
+    device: Optional[str] = None
 
 
 @dataclass

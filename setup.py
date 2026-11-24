@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from setuptools import find_packages, setup
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CUDAExtension
 
 ROOT = Path(__file__).resolve().parent
 OPS_DIR = Path("wall_x") / "model" / "core" / "ops"
@@ -25,6 +25,12 @@ def read_readme() -> str:
 
 
 def build_ext_modules():
+    if CUDA_HOME is None:
+        # No CUDA toolkit (for example an Intel XPU or CPU host): skip the CUDA
+        # operators. wall_x.model.core.ops then uses its PyTorch fallbacks.
+        print("CUDA toolkit not found: building Wall-X without CUDA operators.")
+        return []
+
     binding = CSRC_DIR / "binding.cu"
     if not (ROOT / binding).exists():
         raise RuntimeError(

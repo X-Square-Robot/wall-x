@@ -2,7 +2,6 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-from flash_attn import flash_attn_func
 from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import (
     is_flash_attn_greater_or_equal_2_10,
@@ -16,6 +15,11 @@ from transformers.utils import logging
 
 from wall_x.model.core.attention.mask import find_first_last_ones
 from wall_x.model.core.ops import m_rope, permute, unpermute
+
+try:
+    from flash_attn import flash_attn_func
+except ImportError:
+    flash_attn_func = None
 
 try:
     from flash_mask.flash_mask_interface import flash_mask_attn_func

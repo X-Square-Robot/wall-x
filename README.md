@@ -102,6 +102,27 @@ The exported CUDA operator sources are included in
 parallelism. `--no-build-isolation` is required so the build can use the torch
 package already installed in the active environment.
 
+### Run on Intel GPU (XPU)
+
+Inference also runs on Intel GPUs through PyTorch's XPU backend. Set up the
+Intel GPU driver as described in PyTorch's
+[Intel GPU guide](https://docs.pytorch.org/docs/stable/notes/get_start_xpu.html).
+Then install the XPU build of PyTorch, the requirements without the CUDA
+PyTorch pins (`requirements-xpu.txt`), and Wall-X. Without a CUDA toolkit the
+CUDA operators are not built and Wall-X uses their PyTorch fallbacks:
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/xpu
+pip install -r requirements-xpu.txt
+pip install --no-build-isolation -e .
+python scripts/fake_inference.py --checkpoint-path <path/to/checkpoint> --device xpu
+```
+
+Without `--device`, the model runs on CUDA when it is available, then on XPU,
+then on the CPU. On XPU the vision tower uses PyTorch SDPA instead of
+flash-attn. Flash-attn, the compiled CUDA operators and CUDA graphs
+(`--enable-cuda-graph`) stay CUDA only.
+
 ## Training
 
 ### Finetune on LeRobot Datasets
