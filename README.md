@@ -121,7 +121,7 @@ python scripts/fake_inference.py --checkpoint-path <path/to/checkpoint> --device
 Without `--device`, the model runs on CUDA when it is available, then on XPU,
 then on the CPU. On XPU the vision tower uses PyTorch SDPA instead of
 flash-attn. Flash-attn, the compiled CUDA operators and CUDA graphs
-(`--enable-cuda-graph`) stay CUDA only; training is unchanged.
+(`--enable-cuda-graph`) stay CUDA only.
 
 ## Training
 
