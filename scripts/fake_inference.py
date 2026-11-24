@@ -110,6 +110,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--instruction", default="pick up the object")
     parser.add_argument("--image-size", type=int, default=128)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="Torch device, e.g. cuda, xpu or cpu. Defaults to cuda, then xpu, then cpu.",
+    )
     return parser.parse_args()
 
 
@@ -133,6 +138,7 @@ def main() -> int:
     cfg.model.action_horizon = args.action_horizon
     cfg.model.architecture = args.architecture
     cfg.model.action_mode = args.action_mode
+    cfg.model.device = args.device
     cfg.env.libero = LiberoEnvParams(num_trials_per_task=1, task_indices=[0])
     cfg = autofill_from_checkpoint(cfg)
 
@@ -146,6 +152,7 @@ def main() -> int:
     action = _predict_raw_action(adapter, payload)
 
     print("Fake inference succeeded.")
+    print(f"device: {next(adapter._model.parameters()).device}")
     print(f"action shape: {action.shape}")
     print(f"action dtype: {action.dtype}")
     print(f"action min/max: {float(action.min()):.6f} / {float(action.max()):.6f}")
